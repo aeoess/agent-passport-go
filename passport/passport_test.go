@@ -1,0 +1,321 @@
+// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+
+package passport
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+
+	"github.com/aeoess/agent-passport-go/keys"
+)
+
+// tsRepo is the reference TypeScript SDK checkout the cross-impl oracle runs
+// against. The oracle imports the real createPassport/signPassport/verify
+// functions from this path, exactly how the action_ref cross-impl check works.
+const tsRepo = "/Users/tima/agent-passport-system"
+
+// Deterministic inputs shared by Go and the TS oracle. Private keys are 32-byte
+// Ed25519 seeds derived as sha256 of a fixed string, identical on both sides.
+const (
+	agentKeySeed  = "aps-go-passport-agent-key"
+	issuerKeySeed = "aps-go-passport-issuer-key"
+
+	fixedCreatedAt   = "2026-06-03T12:00:00Z"
+	fixedExpiresAt   = "2027-06-03T12:00:00Z"
+	fixedSignedAt    = "2026-06-03T12:00:00Z"
+	fixedVerifyNow   = "2026-06-03T13:00:00Z" // after createdAt, before expiry
+	fixedNonce       = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	fixedChallengeID = "chal_0001"
+)
+
+// Pinned values produced by the reference TypeScript SDK at build time on the
+// deterministic inputs above (sha256-seeded keys, fixed timestamps, fixed
+// nonce). Captured by running the same oracle this test shells out to. These
+// are not invented; they are the real TS output and guard against drift even
+// when tsx is unavailable.
+const (
+	// sha256 of canonicalize(passport): the agent signed-bytes preimage.
+	tsPassportCanonicalSHA256 = "dd6e679915bed0c034ebf1332ec5d7753ed9eae92cf2aba7ac2cb504650e3f5e"
+	// Ed25519 agent signature over canonicalize(passport).
+	tsAgentSignature = "2a868443bf7f323835de83e4f38df50521a9a95d2c16f9521403794f8b4cfa3c4dfdcba039a000b39978e50a89d72113cc5ec76d4f86bc336e3ce32a5fecfa03"
+	// sha256 of canonicalize({passport, signature, signedAt}): issuer preimage.
+	tsIssuerPayloadSHA256 = "cabd565a705a46e16621f9d3c1f6ac39aa6f9f96ff4f5a97ff48efecdc665bd8"
+	// Ed25519 issuer countersignature over that preimage.
+	tsIssuerSignature = "38730fc807315e5ad579d9fd2428d184af319f961966b2e6909f4eda035888ccee72991c87f236c82b34462cf85509743c635c3d6be208f32e7a325ceadf1a0c"
+	// Ed25519 signature over the raw challenge nonce string.
+	tsChallengeSignature = "f7cd4bb47755b9b6cf8bf51aebdca9789bcf027836e241fdc993f7604602165c2963db50ba6a4af5ddfc1af424c347bcdb9ec30bec8b1f00798daf1ae92e3404"
+)
+
+func seedHex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// fixturePassport builds the deterministic SignedPassport from the shared
+// inputs. The returned signed passport carries the agent self-signature.
+func fixturePassport(t *testing.T) (signed SignedPassport, agentPriv, agentPub, issuerPriv, issuerPub string) {
+	t.Helper()
+	agentPriv = seedHex(agentKeySeed)
+	issuerPriv = seedHex(issuerKeySeed)
+	var err error
+	agentPub, err = keys.PublicKeyFromPrivate(agentPriv)
+	if err != nil {
+		t.Fatalf("derive agent pub: %v", err)
+	}
+	issuerPub, err = keys.PublicKeyFromPrivate(issuerPriv)
+	if err != nil {
+		t.Fatalf("derive issuer pub: %v", err)
+	}
+	in := CreatePassportInput{
+		AgentID:      "ag_passport_001",
+		AgentName:    "Oracle Agent",
+		OwnerAlias:   "tima",
+		PublicKey:    agentPub,
+		Mission:      "cross-impl byte parity",
+		Capabilities: []string{"code_execution", "web_search"},
+		Runtime:      RuntimeInfo{Platform: "node", Models: []string{"claude-opus-4"}, ToolsCount: 3, MemoryType: "ephemeral"},
+		CreatedAt:    fixedCreatedAt,
+		ExpiresAt:    fixedExpiresAt,
+		Reputation:   ReputationScore{Overall: 1, LastUpdated: fixedCreatedAt},
+	}
+	signed, err = CreatePassport(in, agentPriv, fixedSignedAt)
+	if err != nil {
+		t.Fatalf("CreatePassport: %v", err)
+	}
+	return signed, agentPriv, agentPub, issuerPriv, issuerPub
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// TestPassportPinnedAgainstTSReference asserts the Go artifacts are byte/hex
+// identical to the pinned reference TS output: the canonical-byte sha256 of the
+// passport, the agent signature, the issuer preimage hash, the issuer
+// signature, and the challenge signature. This always runs (no tsx needed).
+func TestPassportPinnedAgainstTSReference(t *testing.T) {
+	signed, agentPriv, _, issuerPriv, _ := fixturePassport(t)
+
+	canonical, err := CanonicalBytes(signed.Passport)
+	if err != nil {
+		t.Fatalf("CanonicalBytes: %v", err)
+	}
+	if got := sha256Hex(canonical); got != tsPassportCanonicalSHA256 {
+		t.Errorf("passport canonical sha256\n  go = %s\n  ts = %s", got, tsPassportCanonicalSHA256)
+	}
+	if signed.Signature != tsAgentSignature {
+		t.Errorf("agent signature\n  go = %s\n  ts = %s", signed.Signature, tsAgentSignature)
+	}
+
+	cs, err := CountersignPassport(signed, issuerPriv, "aeoess", fixedSignedAt)
+	if err != nil {
+		t.Fatalf("CountersignPassport: %v", err)
+	}
+	issuerCanonical, err := IssuerCanonicalBytes(cs)
+	if err != nil {
+		t.Fatalf("IssuerCanonicalBytes: %v", err)
+	}
+	if got := sha256Hex(issuerCanonical); got != tsIssuerPayloadSHA256 {
+		t.Errorf("issuer payload sha256\n  go = %s\n  ts = %s", got, tsIssuerPayloadSHA256)
+	}
+	if cs.IssuerSignature.Signature != tsIssuerSignature {
+		t.Errorf("issuer signature\n  go = %s\n  ts = %s", cs.IssuerSignature.Signature, tsIssuerSignature)
+	}
+
+	ch := Challenge{ChallengeID: fixedChallengeID, Nonce: fixedNonce, Timestamp: fixedCreatedAt, ExpiresAt: "2099-01-01T00:00:00Z"}
+	agentPub, _ := keys.PublicKeyFromPrivate(agentPriv)
+	resp, err := SignChallenge(ch, agentPriv, agentPub)
+	if err != nil {
+		t.Fatalf("SignChallenge: %v", err)
+	}
+	if resp.Signature != tsChallengeSignature {
+		t.Errorf("challenge signature\n  go = %s\n  ts = %s", resp.Signature, tsChallengeSignature)
+	}
+}
+
+// tsOracle is the reference oracle. It builds the SAME passport object the Go
+// fixture builds, runs the real reference signPassport/countersignPassport/
+// verifyPassport/verifyChallenge over it, and prints a JSON blob of canonical
+// bytes, hashes, signatures, and verify results. Run via `npx tsx -e`.
+const tsOracle = `
+import { signPassport, countersignPassport, verifyIssuerSignature } from '` + tsRepo + `/src/core/passport.ts';
+import { verifyPassport, verifyChallenge } from '` + tsRepo + `/src/verification/verify.ts';
+import { canonicalize } from '` + tsRepo + `/src/core/canonical.ts';
+import { sign, publicKeyFromPrivate, verify } from '` + tsRepo + `/src/crypto/keys.ts';
+import { createHash } from 'node:crypto';
+
+const sha = (s) => createHash('sha256').update(s).digest('hex');
+const agentPriv = sha('` + agentKeySeed + `').slice(0); // sha256 hex of seed string
+const agentPrivHex = createHash('sha256').update('` + agentKeySeed + `').digest('hex');
+const issuerPrivHex = createHash('sha256').update('` + issuerKeySeed + `').digest('hex');
+const agentPub = publicKeyFromPrivate(agentPrivHex);
+const issuerPub = publicKeyFromPrivate(issuerPrivHex);
+
+const passport = {
+  version: '1.0.0',
+  agentId: 'ag_passport_001',
+  agentName: 'Oracle Agent',
+  ownerAlias: 'tima',
+  publicKey: agentPub,
+  mission: 'cross-impl byte parity',
+  capabilities: ['code_execution','web_search'],
+  runtime: { platform: 'node', models: ['claude-opus-4'], toolsCount: 3, memoryType: 'ephemeral' },
+  createdAt: '` + fixedCreatedAt + `',
+  expiresAt: '` + fixedExpiresAt + `',
+  voteWeight: 2,
+  reputation: { overall: 1, collaborationsCompleted: 0, proposalsSubmitted: 0, proposalsApproved: 0, tokensContributed: 0, tasksCompleted: 0, lastUpdated: '` + fixedCreatedAt + `' },
+  delegations: [],
+  metadata: {}
+};
+
+const passCanonical = canonicalize(passport);
+const agentSig = sign(passCanonical, agentPrivHex);
+const signedAt = '` + fixedSignedAt + `';
+const signed = { passport, signature: agentSig, signedAt };
+
+const issuerPayload = canonicalize({ passport, signature: agentSig, signedAt });
+const issuerSig = sign(issuerPayload, issuerPrivHex);
+const countersigned = { ...signed, issuerSignature: { issuerId: 'aeoess', issuerPublicKey: issuerPub, signature: issuerSig, signedAt: signedAt } };
+
+const challenge = { challengeId: '` + fixedChallengeID + `', nonce: '` + fixedNonce + `', timestamp: '` + fixedCreatedAt + `', expiresAt: '2099-01-01T00:00:00Z' };
+const chalSig = sign(challenge.nonce, agentPrivHex);
+
+const out = {
+  agentPub,
+  issuerPub,
+  passportCanonicalSHA256: sha(passCanonical),
+  agentSignature: agentSig,
+  issuerPayloadSHA256: sha(issuerPayload),
+  issuerSignature: issuerSig,
+  challengeSignature: chalSig,
+  verifyIssuer: verifyIssuerSignature(countersigned, issuerPub),
+  verifyPassport: verifyPassport(signed).valid,
+  verifyChallenge: verifyChallenge(challenge, chalSig, agentPub),
+};
+process.stdout.write(JSON.stringify(out));
+`
+
+type oracleOut struct {
+	AgentPub                string `json:"agentPub"`
+	IssuerPub               string `json:"issuerPub"`
+	PassportCanonicalSHA256 string `json:"passportCanonicalSHA256"`
+	AgentSignature          string `json:"agentSignature"`
+	IssuerPayloadSHA256     string `json:"issuerPayloadSHA256"`
+	IssuerSignature         string `json:"issuerSignature"`
+	ChallengeSignature      string `json:"challengeSignature"`
+	VerifyIssuer            bool   `json:"verifyIssuer"`
+	VerifyPassport          bool   `json:"verifyPassport"`
+	VerifyChallenge         bool   `json:"verifyChallenge"`
+}
+
+// runTSOracle runs the reference oracle via npx tsx and parses its JSON. It
+// skips the calling test (rather than failing) when the TS repo or tsx is not
+// available, so the suite stays green in environments without the reference.
+func runTSOracle(t *testing.T) oracleOut {
+	t.Helper()
+	if _, err := os.Stat(tsRepo); err != nil {
+		t.Skipf("TS reference repo not present at %s; skipping live cross-impl", tsRepo)
+	}
+	if _, err := exec.LookPath("npx"); err != nil {
+		t.Skip("npx not on PATH; skipping live cross-impl")
+	}
+	scriptPath := filepath.Join(t.TempDir(), "oracle.mjs")
+	if err := os.WriteFile(scriptPath, []byte(tsOracle), 0o600); err != nil {
+		t.Fatalf("write oracle: %v", err)
+	}
+	cmd := exec.Command("npx", "tsx", scriptPath)
+	cmd.Dir = tsRepo
+	outBytes, err := cmd.Output()
+	if err != nil {
+		t.Skipf("tsx oracle did not run (%v); skipping live cross-impl", err)
+	}
+	var out oracleOut
+	if err := json.Unmarshal(outBytes, &out); err != nil {
+		t.Fatalf("parse oracle JSON: %v\nraw: %s", err, string(outBytes))
+	}
+	return out
+}
+
+// TestPassportLiveCrossImpl runs the real reference TS SDK at test time and
+// asserts the Go artifacts are byte/hex identical, AND cross-verifies both
+// directions: TS signatures verify under Go Verify, and Go signatures verify
+// under TS verify (the oracle's verify* booleans run over the Go-matching
+// objects, and Go re-verifies the TS signatures here).
+func TestPassportLiveCrossImpl(t *testing.T) {
+	ts := runTSOracle(t)
+	signed, agentPriv, agentPub, issuerPriv, issuerPub := fixturePassport(t)
+
+	if ts.AgentPub != agentPub {
+		t.Fatalf("agent pubkey mismatch: ts=%s go=%s", ts.AgentPub, agentPub)
+	}
+	if ts.IssuerPub != issuerPub {
+		t.Fatalf("issuer pubkey mismatch: ts=%s go=%s", ts.IssuerPub, issuerPub)
+	}
+
+	canonical, _ := CanonicalBytes(signed.Passport)
+	if got := sha256Hex(canonical); got != ts.PassportCanonicalSHA256 {
+		t.Errorf("passport canonical sha256: go=%s ts=%s", got, ts.PassportCanonicalSHA256)
+	}
+	if signed.Signature != ts.AgentSignature {
+		t.Errorf("agent signature: go=%s ts=%s", signed.Signature, ts.AgentSignature)
+	}
+
+	cs, err := CountersignPassport(signed, issuerPriv, "aeoess", fixedSignedAt)
+	if err != nil {
+		t.Fatalf("CountersignPassport: %v", err)
+	}
+	issuerCanonical, _ := IssuerCanonicalBytes(cs)
+	if got := sha256Hex(issuerCanonical); got != ts.IssuerPayloadSHA256 {
+		t.Errorf("issuer payload sha256: go=%s ts=%s", got, ts.IssuerPayloadSHA256)
+	}
+	if cs.IssuerSignature.Signature != ts.IssuerSignature {
+		t.Errorf("issuer signature: go=%s ts=%s", cs.IssuerSignature.Signature, ts.IssuerSignature)
+	}
+
+	ch := Challenge{ChallengeID: fixedChallengeID, Nonce: fixedNonce, Timestamp: fixedCreatedAt, ExpiresAt: "2099-01-01T00:00:00Z"}
+	resp, _ := SignChallenge(ch, agentPriv, agentPub)
+	if resp.Signature != ts.ChallengeSignature {
+		t.Errorf("challenge signature: go=%s ts=%s", resp.Signature, ts.ChallengeSignature)
+	}
+
+	// Direction 1: TS-created signatures verify under Go.
+	if !keys.Verify(canonical, ts.AgentSignature, agentPub) {
+		t.Error("Go failed to verify TS agent signature")
+	}
+	tsCountersigned := cs
+	tsCountersigned.Signature = ts.AgentSignature
+	tsCountersigned.IssuerSignature = &IssuerSignature{
+		IssuerID: "aeoess", IssuerPublicKey: issuerPub, Signature: ts.IssuerSignature, SignedAt: fixedSignedAt,
+	}
+	if !VerifyIssuerSignature(tsCountersigned, issuerPub) {
+		t.Error("Go failed to verify TS issuer countersignature")
+	}
+	tsSigned := signed
+	tsSigned.Signature = ts.AgentSignature
+	if res := VerifyPassport(tsSigned, nil, fixedVerifyNow); !res.Valid {
+		t.Errorf("Go VerifyPassport rejected TS-signed passport: %v", res.Errors)
+	}
+	if !VerifyChallenge(ch, ts.ChallengeSignature, agentPub, fixedVerifyNow) {
+		t.Error("Go failed to verify TS challenge signature")
+	}
+
+	// Direction 2: Go-created signatures verify under TS. The oracle ran
+	// verifyPassport/verifyIssuerSignature/verifyChallenge over objects whose
+	// signatures equal the Go signatures (identical bytes), so these booleans
+	// being true is the TS-verifies-Go assertion.
+	if !ts.VerifyPassport {
+		t.Error("TS verifyPassport rejected the matching (Go-equal) passport")
+	}
+	if !ts.VerifyIssuer {
+		t.Error("TS verifyIssuerSignature rejected the matching (Go-equal) countersignature")
+	}
+	if !ts.VerifyChallenge {
+		t.Error("TS verifyChallenge rejected the matching (Go-equal) challenge")
+	}
+}
