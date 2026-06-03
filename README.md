@@ -49,9 +49,11 @@ Issuing and signing (Waves 2+3):
 Every primitive here is cross-checked byte-for-byte against the TypeScript
 reference SDK: the JCS canonical bytes and the Ed25519 signatures are identical.
 Because Ed25519 is deterministic, a Go signature over the same canonical bytes
-with the same key equals the reference signature exactly. The tests assert this
-directly (and re-run the reference at test time when `APS_TS_REPO` points at a
-checkout; see Conformance).
+with the same key equals the reference signature exactly. The tests assert this directly. Most signing packages (passport, completion,
+attribution, delegation, intoto, values) re-run the TypeScript reference live
+when `APS_TS_REPO` points at a checkout; commerce and coordination assert against
+pinned reference values, which are the same TS-produced bytes by the determinism
+above (see Conformance).
 
 ## What it does not do
 
@@ -78,9 +80,11 @@ test), identical per-category to the TS reference. The runner additionally
 re-signs all 10 bilateral-delegation vectors with the signing core to the
 recorded reference signatures.
 
-The cross-impl tests in each package re-run the reference SDK when `APS_TS_REPO`
-is set to an `agent-passport-system` checkout, and skip cleanly when it is unset
-(the pinned reference values still gate the invariant in that case).
+Most cross-impl tests re-run the reference SDK when `APS_TS_REPO` is set to an
+`agent-passport-system` checkout, and skip cleanly when it is unset. Commerce and
+coordination assert against pinned reference values in both states; their parity
+follows from the JCS canonicalization and Ed25519 signing the other packages
+re-run live.
 
 ```
 # run the cross-impl oracle against a local TS checkout
