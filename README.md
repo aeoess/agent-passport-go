@@ -4,11 +4,47 @@ Verify-first Go SDK for the Agent Passport System (APS). It verifies APS
 protocol artifacts: RFC 8785 JCS canonicalization, content-addressed
 `action_ref`, Ed25519 signatures, and delegation-chain monotonic narrowing.
 
-This is a protocol-primitives library. It is scoped to verification. It does
-not issue passports, sign on your behalf, or run a gateway.
+This is a protocol-primitives library, scoped to verification. It does not
+issue passports, sign on your behalf, or run a gateway.
+
+**Status:** `v0.1.0-alpha.1`, verify-first. Issuing and signing are deferred.
 
 ```
-go get github.com/aeoess/agent-passport-go
+go get github.com/aeoess/agent-passport-go@v0.1.0-alpha.1
+```
+
+(The version is explicit because the current tag is a prerelease.)
+
+## Usage
+
+```go
+package main
+
+import (
+	"fmt"
+
+	"github.com/aeoess/agent-passport-go/actionref"
+	"github.com/aeoess/agent-passport-go/jcs"
+	"github.com/aeoess/agent-passport-go/verify"
+)
+
+func main() {
+	// Canonical bytes hash (RFC 8785 JCS), the signed-bytes preimage.
+	hash, _ := jcs.CanonicalHash(map[string]any{"b": 2, "a": 1})
+	fmt.Println("jcs sha256:", hash)
+
+	// Content-addressed action_ref over the intent fields.
+	ref, _ := actionref.ComputeActionRef(
+		"did:key:zAgent",       // agentID
+		"payment.execute",      // actionType
+		"payment:execute",      // scopeRequired
+		"2026-06-03T12:00:00Z", // createdAt (normalized to second-precision UTC)
+	)
+	fmt.Println("action_ref:", ref)
+
+	// Monotonic narrowing: does a granted scope cover a required one?
+	fmt.Println("covers:", verify.ScopeCovers("payment:*", "payment:execute"))
+}
 ```
 
 ## What it does
@@ -31,10 +67,12 @@ go get github.com/aeoess/agent-passport-go
 
 ## Conformance
 
-Validated against the shared APS conformance fixtures
-(`aps-conformance-suite/fixtures`) through a Go runner that consumes the same
-vectors as the TypeScript runner. See the conformance report for pass counts.
+Validated against the shared APS conformance fixtures through a Go runner
+(`aps-conformance-suite/runners/go`) that consumes the same vectors as the
+TypeScript runner and imports this SDK. It passes the same set: 37 of 38
+vectors, with one documented skip (a diff-document fixture checked by a
+separate test), identical per-category to the TS reference.
 
 ## License
 
-Apache-2.0. Copyright 2024-2026 Tymofii Pidlisnyi. The signed-bytes spec is CC0.
+Apache-2.0. Copyright 2026 Tymofii Pidlisnyi.
