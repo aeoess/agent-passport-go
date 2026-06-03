@@ -1,4 +1,4 @@
-// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+// Copyright 2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
 
 // Package actionref computes the content-addressed request identity action_ref,
 // hex-identical to the APS reference SDK computeActionRef (src/core/action-ref.ts)

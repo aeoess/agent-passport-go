@@ -1,4 +1,4 @@
-// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+// Copyright 2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
 
 package passport
 
@@ -15,9 +15,20 @@ import (
 )
 
 // tsRepo is the reference TypeScript SDK checkout the cross-impl oracle runs
-// against. The oracle imports the real createPassport/signPassport/verify
-// functions from this path, exactly how the action_ref cross-impl check works.
-const tsRepo = "/Users/tima/agent-passport-system"
+// against, resolved from APS_TS_REPO. The oracle imports the real
+// createPassport/signPassport/verify functions from this path, exactly how the
+// action_ref cross-impl check works. When APS_TS_REPO is unset the live oracle
+// skips (see skipUnlessTSRepo); the pinned constants still gate the invariant.
+var tsRepo = os.Getenv("APS_TS_REPO")
+
+// skipUnlessTSRepo skips the calling cross-impl test when APS_TS_REPO is unset
+// or empty, with the canonical message, before any use of the repo path or tsx.
+func skipUnlessTSRepo(t *testing.T) {
+	t.Helper()
+	if tsRepo == "" {
+		t.Skip("set APS_TS_REPO to the agent-passport-system checkout to run the cross-impl oracle")
+	}
+}
 
 // Deterministic inputs shared by Go and the TS oracle. Private keys are 32-byte
 // Ed25519 seeds derived as sha256 of a fixed string, identical on both sides.
@@ -40,13 +51,13 @@ const (
 // when tsx is unavailable.
 const (
 	// sha256 of canonicalize(passport): the agent signed-bytes preimage.
-	tsPassportCanonicalSHA256 = "dd6e679915bed0c034ebf1332ec5d7753ed9eae92cf2aba7ac2cb504650e3f5e"
+	tsPassportCanonicalSHA256 = "0870b81e3d922da164321e92e1310d983b1ba419d7cf637ac057edd3bbd039fe"
 	// Ed25519 agent signature over canonicalize(passport).
-	tsAgentSignature = "2a868443bf7f323835de83e4f38df50521a9a95d2c16f9521403794f8b4cfa3c4dfdcba039a000b39978e50a89d72113cc5ec76d4f86bc336e3ce32a5fecfa03"
+	tsAgentSignature = "587cac21033db22d8e6744ddf3d75219228d7384f4868bb9b5e7a025c7f856dacfc343e6fa3ed1c0141cc0fc4460fa21ae2bb879ec3051e78531c4b8b146700a"
 	// sha256 of canonicalize({passport, signature, signedAt}): issuer preimage.
-	tsIssuerPayloadSHA256 = "cabd565a705a46e16621f9d3c1f6ac39aa6f9f96ff4f5a97ff48efecdc665bd8"
+	tsIssuerPayloadSHA256 = "a884026138ac415a483f2d4322a167e9d919915939ad1d8afc5d5934af8d99e1"
 	// Ed25519 issuer countersignature over that preimage.
-	tsIssuerSignature = "38730fc807315e5ad579d9fd2428d184af319f961966b2e6909f4eda035888ccee72991c87f236c82b34462cf85509743c635c3d6be208f32e7a325ceadf1a0c"
+	tsIssuerSignature = "3f4bebf4250638b44f27b0e8649833025e0f3f9e9cad0cb26efcf3b741da12a04a739a2cdaf15e15ae9b51cc8d607af2e835f7e196d228ce8a18a7d5ad65180f"
 	// Ed25519 signature over the raw challenge nonce string.
 	tsChallengeSignature = "f7cd4bb47755b9b6cf8bf51aebdca9789bcf027836e241fdc993f7604602165c2963db50ba6a4af5ddfc1af424c347bcdb9ec30bec8b1f00798daf1ae92e3404"
 )
@@ -74,7 +85,7 @@ func fixturePassport(t *testing.T) (signed SignedPassport, agentPriv, agentPub, 
 	in := CreatePassportInput{
 		AgentID:      "ag_passport_001",
 		AgentName:    "Oracle Agent",
-		OwnerAlias:   "tima",
+		OwnerAlias:   "owner-alpha",
 		PublicKey:    agentPub,
 		Mission:      "cross-impl byte parity",
 		Capabilities: []string{"code_execution", "web_search"},
@@ -143,7 +154,7 @@ func TestPassportPinnedAgainstTSReference(t *testing.T) {
 // fixture builds, runs the real reference signPassport/countersignPassport/
 // verifyPassport/verifyChallenge over it, and prints a JSON blob of canonical
 // bytes, hashes, signatures, and verify results. Run via `npx tsx -e`.
-const tsOracle = `
+var tsOracle = `
 import { signPassport, countersignPassport, verifyIssuerSignature } from '` + tsRepo + `/src/core/passport.ts';
 import { verifyPassport, verifyChallenge } from '` + tsRepo + `/src/verification/verify.ts';
 import { canonicalize } from '` + tsRepo + `/src/core/canonical.ts';
@@ -161,7 +172,7 @@ const passport = {
   version: '1.0.0',
   agentId: 'ag_passport_001',
   agentName: 'Oracle Agent',
-  ownerAlias: 'tima',
+  ownerAlias: 'owner-alpha',
   publicKey: agentPub,
   mission: 'cross-impl byte parity',
   capabilities: ['code_execution','web_search'],
@@ -248,6 +259,7 @@ func runTSOracle(t *testing.T) oracleOut {
 // under TS verify (the oracle's verify* booleans run over the Go-matching
 // objects, and Go re-verifies the TS signatures here).
 func TestPassportLiveCrossImpl(t *testing.T) {
+	skipUnlessTSRepo(t)
 	ts := runTSOracle(t)
 	signed, agentPriv, agentPub, issuerPriv, issuerPub := fixturePassport(t)
 

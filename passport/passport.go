@@ -1,4 +1,4 @@
-// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+// Copyright 2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
 
 // Package passport ports the APS passport protocol primitives from the
 // reference TypeScript SDK (src/core/passport.ts and src/verification/verify.ts)

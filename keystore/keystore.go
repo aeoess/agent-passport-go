@@ -1,4 +1,4 @@
-// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+// Copyright 2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
 
 // Package keystore mirrors the reference SDK key-storage backend interface
 // (src/crypto/key-storage.ts). InMemoryKeyStorage holds keys in process memory

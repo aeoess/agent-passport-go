@@ -1,4 +1,4 @@
-// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+// Copyright 2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
 
 // Package completion ports the APS bilateral completion-receipt primitives from
 // the reference SDK (src/core/completion.ts). A completion receipt closes the

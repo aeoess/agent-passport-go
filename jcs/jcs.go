@@ -1,4 +1,4 @@
-// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+// Copyright 2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
 
 // Package jcs implements RFC 8785 JSON Canonicalization Scheme, byte-identical
 // to the APS reference SDK canonicalizeJCS (src/core/canonical-jcs.ts).

@@ -1,4 +1,4 @@
-// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+// Copyright 2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
 
 package delegation
 
@@ -18,8 +18,8 @@ import (
 const (
 	delSeedInput = "aps-go-delegation-key"
 	wantPub      = "8624c256201521da99c274a64767c0816da7a112dfaaf18f704ff9917197e214"
-	// Reference values produced by a real `npx tsx` run against
-	// /Users/tima/agent-passport-system at build time (sign over the legacy
+	// Reference values produced by a real `npx tsx` run against the
+	// agent-passport-system checkout at build time (sign over the legacy
 	// canonicalize, which equals canonicalizeJCS for this no-null ASCII shape).
 	// Not authored from memory; reproduced live in TestDelegationLiveCrossImpl.
 	wantDelSig = "8b7682fa79fe93aa635ba1402363691d9e3e66d62a72753f98b89cd27466ede6d1480b93d763d2992ee083478bd783f62b61419434341d7eead275ebadf2a10a"
@@ -140,24 +140,27 @@ func TestSubDelegateNarrowing(t *testing.T) {
 // asserts byte/hex identity plus cross-verification both directions. It skips
 // gracefully when npx or the TS repo is unavailable.
 func TestDelegationLiveCrossImpl(t *testing.T) {
-	const tsRepo = "/Users/tima/agent-passport-system"
+	repo := os.Getenv("APS_TS_REPO")
+	if repo == "" {
+		t.Skip("set APS_TS_REPO to the agent-passport-system checkout to run the cross-impl oracle")
+	}
 	if _, err := exec.LookPath("npx"); err != nil {
 		t.Skip("npx not available")
 	}
-	if _, err := os.Stat(tsRepo); err != nil {
+	if _, err := os.Stat(repo); err != nil {
 		t.Skip("TS reference repo not present")
 	}
 	script := `
 import crypto from "node:crypto";
-import { sign, publicKeyFromPrivate } from "` + tsRepo + `/src/crypto/keys.ts";
-import { canonicalize } from "` + tsRepo + `/src/core/canonical.ts";
+import { sign, publicKeyFromPrivate } from "` + repo + `/src/crypto/keys.ts";
+import { canonicalize } from "` + repo + `/src/core/canonical.ts";
 const seed = crypto.createHash("sha256").update("` + delSeedInput + `").digest("hex");
 const pub = publicKeyFromPrivate(seed);
 const del = { delegationId:"del_000000000001", delegatedTo:"did:aps:agent002", delegatedBy:pub, scope:["data:read","commerce:checkout"], spendLimit:500, maxDepth:1, currentDepth:0, expiresAt:"2026-06-04T12:00:00.000Z", notBefore:"2026-06-03T12:00:00.000Z", createdAt:"2026-06-03T12:00:00.000Z" };
 console.log("DEL_SIG="+sign(canonicalize(del), seed));
 `
 	cmd := exec.Command("npx", "tsx", "-e", script)
-	cmd.Dir = tsRepo
+	cmd.Dir = repo
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Skipf("tsx run failed (environment): %v", err)

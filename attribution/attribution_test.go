@@ -1,4 +1,4 @@
-// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+// Copyright 2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
 
 package attribution
 
@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -16,10 +17,22 @@ import (
 // Deterministic inputs shared by Go and the TS reference. No randomness, no
 // wall-clock: the private key is sha256("aps-go-attribution-key"), timestamps
 // and IDs are fixed strings.
-const (
-	tsRepo  = "/Users/tima/agent-passport-system"
-	keySeed = "aps-go-attribution-key"
-)
+const keySeed = "aps-go-attribution-key"
+
+// tsRepo is the reference TypeScript SDK checkout, resolved from APS_TS_REPO.
+// The cross-impl oracle tests interpolate it into their tsx import paths. When
+// APS_TS_REPO is unset they skip (see skipUnlessTSRepo); the pinned constants
+// still guard the cross-impl invariant.
+var tsRepo = os.Getenv("APS_TS_REPO")
+
+// skipUnlessTSRepo skips the calling cross-impl test when APS_TS_REPO is unset
+// or empty, with the canonical message, before any use of the repo path or tsx.
+func skipUnlessTSRepo(t *testing.T) {
+	t.Helper()
+	if tsRepo == "" {
+		t.Skip("set APS_TS_REPO to the agent-passport-system checkout to run the cross-impl oracle")
+	}
+}
 
 // deriveSeed reproduces sha256("aps-go-attribution-key") as lowercase hex, the
 // same derivation the TS cross-check uses, so both sides sign with one key.
@@ -112,6 +125,7 @@ func runTSX(t *testing.T, script string) string {
 // hashReceipt (src/core/attribution.ts) at build time for fixtureReceipt, and
 // re-derives it live from the TS SDK to guard against drift.
 func TestHashReceiptCrossImpl(t *testing.T) {
+	skipUnlessTSRepo(t)
 	// Produced by the TS reference hashReceipt() at build time for fixtureReceipt.
 	const tsHash = "1c2dadd5fab4b8eae7cb88caad5995f0224bd0a79dcaae8258f328d8bb7765b5"
 
@@ -145,6 +159,7 @@ process.stdout.write(hashReceipt(receipt));
 // against pinned TS values and a live TS recompute. Leaves are passed unsorted
 // to exercise the sort-for-determinism step.
 func TestBuildMerkleRootCrossImpl(t *testing.T) {
+	skipUnlessTSRepo(t)
 	cases := []struct {
 		name   string
 		leaves []string
@@ -195,6 +210,7 @@ process.stdout.write(JSON.stringify(r));
 // asserts Go regenerates an identical proof, and that VerifyMerkleProof accepts
 // the TS-generated proof (cross-verification) and the Go-generated proof.
 func TestMerkleProofCrossImpl(t *testing.T) {
+	skipUnlessTSRepo(t)
 	even := []string{"ee", "aa", "cc", "bb", "dd"}
 	odd := []string{"z1", "z2", "z3"}
 
@@ -285,6 +301,7 @@ process.stdout.write(JSON.stringify(out));
 // which the reference mints from a uuid) against the live TS trace minus its
 // traceId, on identical deterministic inputs.
 func TestTraceBeneficiaryCrossImpl(t *testing.T) {
+	skipUnlessTSRepo(t)
 	receipt := fixtureReceipt()
 	delegations := []TraceDelegation{
 		{DelegationID: "del_pa", DelegatedBy: "pk_principal", DelegatedTo: "pk_agent", Scope: []string{"compute:exec"}},
@@ -331,6 +348,7 @@ process.stdout.write(JSON.stringify(rest));
 // the Ed25519 signature hex are byte/hex-identical to the TS reference. It also
 // asserts cross-verification both directions.
 func TestAttributionReportCrossImpl(t *testing.T) {
+	skipUnlessTSRepo(t)
 	seed := deriveSeed()
 	pub, err := keys.PublicKeyFromPrivate(seed)
 	if err != nil {

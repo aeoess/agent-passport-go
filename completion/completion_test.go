@@ -1,4 +1,4 @@
-// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+// Copyright 2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
 
 package completion
 
@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -15,8 +16,20 @@ import (
 	"github.com/aeoess/agent-passport-go/verify"
 )
 
-// tsSDKDir is the reference SDK checkout used by the cross-impl oracle.
-const tsSDKDir = "/Users/tima/agent-passport-system"
+// tsSDKDir is the reference SDK checkout used by the cross-impl oracle,
+// resolved from APS_TS_REPO. The tsx scripts interpolate it into their import
+// paths at runtime. When APS_TS_REPO is unset the cross-impl tests skip (see
+// skipUnlessTSRepo); the pinned constants still guard the invariant.
+var tsSDKDir = os.Getenv("APS_TS_REPO")
+
+// skipUnlessTSRepo skips the calling cross-impl test when APS_TS_REPO is unset
+// or empty, with the canonical message, before any use of the repo path or tsx.
+func skipUnlessTSRepo(t *testing.T) {
+	t.Helper()
+	if tsSDKDir == "" {
+		t.Skip("set APS_TS_REPO to the agent-passport-system checkout to run the cross-impl oracle")
+	}
+}
 
 // detSeedHex derives the deterministic private seed the same way on both sides:
 // sha256("aps-go-completion-key") as 64-char hex (a 32-byte Ed25519 seed). No
@@ -124,6 +137,7 @@ func parseKV(s string) map[string]string {
 // byte/hex-identical to the live TS reference, and each side must verify the
 // other's signature.
 func TestCreateCompletionReceipt_NoCitations_CrossImpl(t *testing.T) {
+	skipUnlessTSRepo(t)
 	opts := fixedNoCiteOpts()
 	r, err := CreateCompletionReceipt(opts)
 	if err != nil {
@@ -139,10 +153,10 @@ func TestCreateCompletionReceipt_NoCitations_CrossImpl(t *testing.T) {
 	}
 
 	// Live TS run over the SAME deterministic body.
-	const script = `
+	script := `
 import { createHash } from "node:crypto";
-import { canonicalize } from "/Users/tima/agent-passport-system/src/core/canonical.ts";
-import { sign, publicKeyFromPrivate } from "/Users/tima/agent-passport-system/src/crypto/keys.ts";
+import { canonicalize } from "` + tsSDKDir + `/src/core/canonical.ts";
+import { sign, publicKeyFromPrivate } from "` + tsSDKDir + `/src/crypto/keys.ts";
 const priv = createHash("sha256").update("aps-go-completion-key").digest("hex");
 const body = {
   completionId: "cmp_000000000001",
@@ -186,6 +200,7 @@ console.log("PUB=" + publicKeyFromPrivate(priv));
 // them live from the TS reference. The TS end-to-end verifyCompletionReceipt
 // (with a real attribution receipt) is exercised separately below.
 func TestCreateCompletionReceipt_Citations_CrossImpl(t *testing.T) {
+	skipUnlessTSRepo(t)
 	opts := fixedCiteOpts()
 	r, err := CreateCompletionReceipt(opts)
 	if err != nil {
@@ -200,10 +215,10 @@ func TestCreateCompletionReceipt_Citations_CrossImpl(t *testing.T) {
 		t.Fatalf("signature drift (cite): go=%s pinned=%s", r.Signature, tsSigCite)
 	}
 
-	const script = `
+	script := `
 import { createHash } from "node:crypto";
-import { canonicalize } from "/Users/tima/agent-passport-system/src/core/canonical.ts";
-import { sign } from "/Users/tima/agent-passport-system/src/crypto/keys.ts";
+import { canonicalize } from "` + tsSDKDir + `/src/core/canonical.ts";
+import { sign } from "` + tsSDKDir + `/src/crypto/keys.ts";
 const priv = createHash("sha256").update("aps-go-completion-key").digest("hex");
 const body = {
   completionId: "cmp_000000000002",
@@ -258,12 +273,13 @@ console.log("SIG=" + sign(c, priv));
 // artifact verifies under TS - the (d) cross-verification direction for the
 // citations branch.
 func TestCitationsCompletion_TSEndToEnd(t *testing.T) {
+	skipUnlessTSRepo(t)
 	// Step 1: build a real attribution receipt in TS and read back its fields.
-	const buildScript = `
-import { createHybridTimestampAt } from "/Users/tima/agent-passport-system/src/core/time.ts";
-import { createAttributionReceipt, signAttributionConsent } from "/Users/tima/agent-passport-system/src/v2/attribution-consent/index.ts";
+	buildScript := `
+import { createHybridTimestampAt } from "` + tsSDKDir + `/src/core/time.ts";
+import { createAttributionReceipt, signAttributionConsent } from "` + tsSDKDir + `/src/v2/attribution-consent/index.ts";
 import { createHash } from "node:crypto";
-import { publicKeyFromPrivate } from "/Users/tima/agent-passport-system/src/crypto/keys.ts";
+import { publicKeyFromPrivate } from "` + tsSDKDir + `/src/crypto/keys.ts";
 const citerPriv = createHash("sha256").update("aps-go-completion-citer").digest("hex");
 const principalPriv = createHash("sha256").update("aps-go-completion-principal").digest("hex");
 const now = Date.now();
@@ -342,7 +358,7 @@ console.log("ID=" + receipt.id);
 		t.Fatal(err)
 	}
 	verifyScript := `
-import { verifyCompletionReceipt } from "/Users/tima/agent-passport-system/src/core/completion.ts";
+import { verifyCompletionReceipt } from "` + tsSDKDir + `/src/core/completion.ts";
 const receipt = ` + string(completionJSON) + `;
 const attr = [` + receiptJSON + `];
 const r = verifyCompletionReceipt(receipt, "` + tsPubKey + `", attr);
@@ -375,7 +391,7 @@ func assertTSVerifies(t *testing.T, r *CompletionReceipt, pub string, wantValid 
 		t.Fatal(err)
 	}
 	script := `
-import { verifyCompletionReceipt } from "/Users/tima/agent-passport-system/src/core/completion.ts";
+import { verifyCompletionReceipt } from "` + tsSDKDir + `/src/core/completion.ts";
 const receipt = ` + string(receiptJSON) + `;
 const r = verifyCompletionReceipt(receipt, "` + pub + `");
 console.log("VALID=" + r.valid);
@@ -430,6 +446,7 @@ func TestVerifyCompletionReceipt_BadResult(t *testing.T) {
 // against the TS reference: matching hash -> linked, mismatch -> not linked, and
 // the permit hash itself equals the live TS legacy-canonical sha256.
 func TestLinkPermitAndCompletion_CrossImpl(t *testing.T) {
+	skipUnlessTSRepo(t)
 	permit := map[string]interface{}{
 		"receiptId": "rcpt_permit_0001",
 		"decision":  "allow",
@@ -438,9 +455,9 @@ func TestLinkPermitAndCompletion_CrossImpl(t *testing.T) {
 	}
 
 	// Live TS legacy-canonical hash of the null-stripped permit body.
-	const script = `
+	script := `
 import { createHash } from "node:crypto";
-import { canonicalize } from "/Users/tima/agent-passport-system/src/core/canonical.ts";
+import { canonicalize } from "` + tsSDKDir + `/src/core/canonical.ts";
 const permit = { receiptId: "rcpt_permit_0001", decision: "allow", agentId: "ag_test_001", signature: "deadbeef" };
 const { signature, ...rest } = permit;
 const c = canonicalize(rest);

@@ -1,4 +1,4 @@
-// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+// Copyright 2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
 
 package intoto
 
@@ -23,9 +23,6 @@ import (
 // seconds (a trailing .000Z). All IDs, timestamps, and nonces are fixed.
 
 const (
-	// tsRepo is the reference TS SDK checkout used by the build-time oracle.
-	tsRepo = "/Users/tima/agent-passport-system"
-
 	// seedString is hashed to the 32-byte Ed25519 seed on BOTH sides.
 	seedString = "aps-go-intoto-key"
 
@@ -33,6 +30,20 @@ const (
 	// renders in the TS harness (millisecond precision).
 	fixedIssuedAt = "2026-06-03T12:00:00.000Z"
 )
+
+// tsRepo is the reference TS SDK checkout used by the build-time oracle,
+// resolved from APS_TS_REPO. When unset the live oracle skips (see
+// skipUnlessTSRepo); the pinned constants still gate the cross-impl invariant.
+var tsRepo = os.Getenv("APS_TS_REPO")
+
+// skipUnlessTSRepo skips the calling cross-impl test when APS_TS_REPO is unset
+// or empty, with the canonical message, before any use of the repo path or tsx.
+func skipUnlessTSRepo(t *testing.T) {
+	t.Helper()
+	if tsRepo == "" {
+		t.Skip("set APS_TS_REPO to the agent-passport-system checkout to run the cross-impl oracle")
+	}
+}
 
 // deriveSeed reproduces the seed both implementations use.
 func deriveSeed() string {
@@ -346,6 +357,7 @@ func runTSOracle(t *testing.T, in EmitInput, goEnv DecisionReceiptEnvelope) tsOr
 // It also reconfirms the pinned constants drift-free. Skips cleanly when the TS
 // repo or npx is not available; the pin test still runs in that case.
 func TestEmitDecisionReceiptCrossImpl(t *testing.T) {
+	skipUnlessTSRepo(t)
 	seed := deriveSeed()
 	pub, err := keys.PublicKeyFromPrivate(seed)
 	if err != nil {

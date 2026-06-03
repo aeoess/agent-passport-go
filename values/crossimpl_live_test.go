@@ -1,4 +1,4 @@
-// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+// Copyright 2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
 
 package values
 
@@ -15,17 +15,23 @@ import (
 	"github.com/aeoess/agent-passport-go/jcs"
 )
 
-// tsRepoPath is where the reference TypeScript SDK lives. The live cross-impl
-// tests run the REAL TS functions here via `npx tsx` and assert the Go output
-// equals the live TS output. When the repo or tsx is unavailable (for example
-// in a CI runner that only has Go), the tests skip rather than fail: the pinned
-// constants in values_test.go still guard the cross-impl invariant. Override
-// with APS_TS_REPO if the reference lives elsewhere.
+// tsRepoPath returns the reference TypeScript SDK checkout from the APS_TS_REPO
+// environment variable. The live cross-impl tests run the REAL TS functions
+// there via `npx tsx` and assert the Go output equals the live TS output. When
+// APS_TS_REPO is unset (for example in a CI runner that only has Go), the tests
+// skip rather than fail: the pinned constants in values_test.go still guard the
+// cross-impl invariant. There is no hardcoded fallback path.
 func tsRepoPath() string {
-	if p := os.Getenv("APS_TS_REPO"); p != "" {
-		return p
+	return os.Getenv("APS_TS_REPO")
+}
+
+// skipUnlessTSRepo skips the calling cross-impl test when APS_TS_REPO is unset
+// or empty, with the canonical message, before any use of the repo path or tsx.
+func skipUnlessTSRepo(t *testing.T) {
+	t.Helper()
+	if tsRepoPath() == "" {
+		t.Skip("set APS_TS_REPO to the agent-passport-system checkout to run the cross-impl oracle")
 	}
-	return "/Users/tima/agent-passport-system"
 }
 
 // runTSX writes script to a temp .mjs inside the TS repo (so absolute-path
@@ -76,6 +82,7 @@ func runTSX(t *testing.T, script string) map[string]string {
 // the build-time oracle; the pinned constants in values_test.go are its
 // recorded output.
 func TestAttestFloor_LiveTS(t *testing.T) {
+	skipUnlessTSRepo(t)
 	script := `
 import crypto from 'node:crypto'
 import { canonicalize } from '` + tsRepoPath() + `/src/core/canonical.ts'
@@ -128,6 +135,7 @@ console.log('SIG '+sign(c,privHex))
 // Go report's canonical bytes and signature equal the live TS values. It signs
 // the live TS report object the same way the function does and compares.
 func TestEvaluateCompliance_LiveTS(t *testing.T) {
+	skipUnlessTSRepo(t)
 	script := `
 import crypto from 'node:crypto'
 import { canonicalize } from '` + tsRepoPath() + `/src/core/canonical.ts'
@@ -192,6 +200,7 @@ console.log('SIG '+sign(c,privHex))
 // TestTSVerifiesGoSignature: a Go-created artifact verifies under the TS verify
 // function (Go-created -> TS verify, the second direction of cross-verification).
 func TestTSVerifiesGoSignature(t *testing.T) {
+	skipUnlessTSRepo(t)
 	att := buildTestAttestation(t) // Go-created, Go-signed
 	canonMap := attestationToMap(att)
 	delete(canonMap, "signature")

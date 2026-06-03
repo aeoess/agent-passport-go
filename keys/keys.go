@@ -1,4 +1,4 @@
-// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+// Copyright 2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
 
 // Package keys is the APS signing core. It generates Ed25519 keypairs, signs
 // messages, and derives public keys, byte-compatible with the reference SDK

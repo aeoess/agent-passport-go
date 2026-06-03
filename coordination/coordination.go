@@ -1,4 +1,4 @@
-// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+// Copyright 2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
 
 // Package coordination ports the APS Layer 6 coordination primitives from the
 // reference SDK (src/core/coordination.ts) into Go. It covers the signed-message

@@ -1,4 +1,4 @@
-// Copyright 2024-2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
+// Copyright 2026 Tymofii Pidlisnyi. Apache-2.0 license. See LICENSE.
 
 // Package verify implements APS verification: Ed25519 signature checks over
 // canonical bytes, delegation-chain monotonic-narrowing validation, and
