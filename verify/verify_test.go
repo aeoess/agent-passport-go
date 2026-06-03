@@ -143,7 +143,7 @@ func TestScopeCovers(t *testing.T) {
 	}{
 		{"data:read", "data:read", true},
 		{"*", "anything:here", true},
-		{"data", "data:read", true},          // prefix
+		{"data", "data:read", true}, // prefix
 		{"refund:order:*", "refund:order:abc", true},
 		{"refund:order:*", "refund:order", true},
 		{"data:read", "data:write", false},
