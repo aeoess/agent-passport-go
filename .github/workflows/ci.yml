@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - run: go build ./...
+      - run: go vet ./...
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { echo 'gofmt needed on:'; gofmt -l .; exit 1; }
+      - run: go test ./...
+
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: agent-passport-go
+      - uses: actions/checkout@v4
+        with:
+          repository: aeoess/aps-conformance-suite
+          path: aps-conformance-suite
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: run Go conformance runner against this commit
+        run: |
+          cd aps-conformance-suite/runners/go
+          go mod edit -replace github.com/aeoess/agent-passport-go=../../../agent-passport-go
+          go mod tidy
+          go run . | tee /tmp/conf.out
+          grep -qE "TOTAL: .*fail=0" /tmp/conf.out
