@@ -24,6 +24,7 @@ package commerce
 import (
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/aeoess/agent-passport-go/keys"
 	"github.com/aeoess/agent-passport-go/types"
@@ -181,6 +182,17 @@ func CheckScopeGate(delegation CommerceDelegation) PreflightCheck {
 // remaining budget (spendLimit minus spentAmount). Mirrors checkSpendGate in
 // src/core/commerce.ts. Pure arithmetic; mutates nothing.
 func CheckSpendGate(delegation CommerceDelegation, estimatedTotal Money) PreflightCheck {
+	// Currency must match before comparing amounts: the SDK does NO conversion, so a EUR purchase
+	// must not be charged against a USD budget. Compare case-insensitively (ISO 4217); a declared
+	// mismatch denies. No constraint when a currency is absent on either side.
+	if estimatedTotal.Currency != "" && delegation.Currency != "" &&
+		!strings.EqualFold(estimatedTotal.Currency, delegation.Currency) {
+		return PreflightCheck{
+			Check:  "spend_limit",
+			Passed: false,
+			Detail: "Currency mismatch: purchase in " + estimatedTotal.Currency + " cannot be charged against a " + delegation.Currency + " budget",
+		}
+	}
 	remaining := delegation.SpendLimit - delegation.SpentAmount
 	ok := estimatedTotal.Amount <= remaining
 	detail := "Purchase " + fmtNum(estimatedTotal.Amount) +
