@@ -22,6 +22,9 @@
 package commerce
 
 import (
+	"fmt"
+	"math"
+
 	"github.com/aeoess/agent-passport-go/keys"
 	"github.com/aeoess/agent-passport-go/types"
 	"github.com/aeoess/agent-passport-go/verify"
@@ -194,6 +197,31 @@ func CheckSpendGate(delegation CommerceDelegation, estimatedTotal Money) Preflig
 		Passed: ok,
 		Detail: detail,
 	}
+}
+
+// RecordSpend records a spend against a commerce delegation and returns a NEW
+// CommerceDelegation with SpentAmount incremented. It is the stateless write
+// primitive that pairs with CheckSpendGate: check before a purchase, record
+// after it settles, and persist the returned value yourself. The SDK is
+// by-value and stateless; it does not persist spend between calls, and
+// cumulative enforcement across purchases is the caller's or the gateway's
+// responsibility. It refuses a negative or non-finite amount, and a spend that
+// would push SpentAmount past SpendLimit (so it doubles as a safe
+// check-and-record). Mirrors recordSpend in src/core/commerce.ts.
+// CommerceDelegation is unsigned, so this is signature-safe; the signed core
+// Delegation does not carry a running spentAmount.
+func RecordSpend(delegation CommerceDelegation, amount float64) (CommerceDelegation, error) {
+	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount < 0 {
+		return delegation, fmt.Errorf("RecordSpend: amount must be a non-negative finite number, got %v", amount)
+	}
+	newSpent := delegation.SpentAmount + amount
+	if newSpent > delegation.SpendLimit {
+		return delegation, fmt.Errorf("RecordSpend: spend %v would exceed the spend limit (%v > %v, already spent %v)",
+			amount, newSpent, delegation.SpendLimit, delegation.SpentAmount)
+	}
+	out := delegation
+	out.SpentAmount = newSpent
+	return out, nil
 }
 
 // CheckHumanApprovalThreshold returns a non-empty reason string when the
