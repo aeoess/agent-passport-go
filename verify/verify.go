@@ -202,14 +202,22 @@ func VerifyDelegationChain(chain []types.Delegation) error {
 		if child.DelegatedBy != parent.DelegatedTo {
 			return errors.New("chain linkage broken: child.delegatedBy != parent.delegatedTo")
 		}
-		if parent.MaxDepth != nil {
-			d := 0
-			if child.CurrentDepth != nil {
-				d = *child.CurrentDepth
-			}
-			if d > *parent.MaxDepth {
-				return errors.New("depth limit exceeded")
-			}
+		// Depth must increase by exactly one per hop AND stay within the parent's maxDepth.
+		// Checking only child.currentDepth <= parent.maxDepth let a long chain claim a flat depth
+		// and bypass the bound; require strict monotonic increment so depth tracks the real hop count.
+		parentDepth := 0
+		if parent.CurrentDepth != nil {
+			parentDepth = *parent.CurrentDepth
+		}
+		childDepth := 0
+		if child.CurrentDepth != nil {
+			childDepth = *child.CurrentDepth
+		}
+		if childDepth != parentDepth+1 {
+			return errors.New("depth not monotonic: child.currentDepth must be parent.currentDepth + 1")
+		}
+		if parent.MaxDepth != nil && childDepth > *parent.MaxDepth {
+			return errors.New("depth limit exceeded")
 		}
 		for _, s := range child.Scope {
 			covered := false
@@ -226,7 +234,19 @@ func VerifyDelegationChain(chain []types.Delegation) error {
 		if parent.SpendLimit != nil && child.SpendLimit != nil && *child.SpendLimit > *parent.SpendLimit {
 			return errors.New("spend limit widening: child exceeds parent")
 		}
-		if parent.ExpiresAt != "" && child.ExpiresAt != "" {
+		// Spend unit may not change across a hop. When the parent carries a unit and the child
+		// carries a spend limit, the child must carry the SAME unit; dropping or changing it (e.g.
+		// invocations -> currency, or invocations -> unit-less which downstream treats as currency)
+		// is a narrowing violation that a numeric-only check misses.
+		if parent.SpendLimitUnit != "" && child.SpendLimit != nil && child.SpendLimitUnit != parent.SpendLimitUnit {
+			return errors.New("spend unit change: child must carry the parent spendLimitUnit unchanged")
+		}
+		// Temporal narrowing: a child may not outlive its parent. A missing child expiry must not
+		// bypass the check when the parent has one.
+		if parent.ExpiresAt != "" {
+			if child.ExpiresAt == "" {
+				return errors.New("expiry widening: child has no expiry but parent does")
+			}
 			pe, perr := parseMillis(parent.ExpiresAt)
 			ce, cerr := parseMillis(child.ExpiresAt)
 			if perr && cerr && ce > pe {

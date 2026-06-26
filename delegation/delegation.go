@@ -153,11 +153,14 @@ func SubDelegate(opts SubDelegateOptions) (types.Delegation, error) {
 		DelegatedTo:  opts.DelegatedTo,
 		Scope:        opts.Scope,
 		SpendLimit:   opts.SpendLimit,
-		MaxDepth:     &maxD,
-		CurrentDepth: &newDepth,
-		ExpiresAt:    opts.ExpiresAt,
-		NotBefore:    opts.NotBefore,
-		CreatedAt:    opts.CreatedAt,
+		// Carry the parent's spend unit forward so a sub-delegation cannot silently drop or change
+		// it (an invocations budget must not become a currency budget across a hop).
+		SpendLimitUnit: parent.SpendLimitUnit,
+		MaxDepth:       &maxD,
+		CurrentDepth:   &newDepth,
+		ExpiresAt:      opts.ExpiresAt,
+		NotBefore:      opts.NotBefore,
+		CreatedAt:      opts.CreatedAt,
 	}
 	sig, err := keys.SignArtifact(canonicalMap(child), "signature", opts.PrivateKey)
 	if err != nil {
