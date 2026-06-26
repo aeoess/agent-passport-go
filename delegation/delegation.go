@@ -120,6 +120,12 @@ type SubDelegateOptions struct {
 // parent, matching the reference subDelegate refusal semantics.
 func SubDelegate(opts SubDelegateOptions) (types.Delegation, error) {
 	parent := opts.Parent
+	// Verify the parent before minting a child. Previously SubDelegate trusted any parent struct, so
+	// a forged or invalid parent signature could mint an authority-bearing child (parity with the
+	// Python sub_delegate parent check).
+	if !VerifyDelegation(parent) {
+		return types.Delegation{}, errors.New("delegation: cannot sub-delegate from a parent with an invalid signature")
+	}
 	parentDepth := 0
 	if parent.CurrentDepth != nil {
 		parentDepth = *parent.CurrentDepth

@@ -113,6 +113,11 @@ func ValidateChain(in ChainInput) string {
 	}
 	for i, link := range in.Chain {
 		notAfter := nestedString(link, "validityWindow", "not_after")
+		// A link with no not_after must be treated as invalid, not as never-expiring. parseMillis("")
+		// returns (now, true) so an empty not_after would otherwise pass the expiry gate (fail-open).
+		if notAfter == "" {
+			return CodeValidityExp
+		}
 		naMs, naOK := parseMillis(notAfter)
 		if !naOK || naMs < nowMs {
 			return CodeValidityExp
