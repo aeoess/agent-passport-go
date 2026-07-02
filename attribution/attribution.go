@@ -19,6 +19,16 @@
 //
 // Key-custody: callers supply private keys; no global mutable key state exists
 // in this package, and key material is never logged or placed in an error.
+//
+// Crypto dependency: the honest resolved/verified split (see TraceBeneficiary)
+// requires REAL ed25519 verification of the receipt and every delegation hop.
+// Rather than reimplement the canonical crypto, this package imports the shared
+// verifiers (delegation.VerifyDelegation, verify.VerifyCanonicalSignature, jcs,
+// keys). TraceBeneficiary is therefore no longer a standalone lookup helper: an
+// empty or forged signature makes `verified` false. The earlier note that this
+// package was declared independent of the delegation package (so both build in
+// parallel) no longer holds for the trace path; the Merkle and report helpers
+// remain pure.
 package attribution
 
 import (
@@ -26,8 +36,11 @@ import (
 	"encoding/hex"
 	"sort"
 
+	"github.com/aeoess/agent-passport-go/delegation"
 	"github.com/aeoess/agent-passport-go/jcs"
 	"github.com/aeoess/agent-passport-go/keys"
+	"github.com/aeoess/agent-passport-go/types"
+	"github.com/aeoess/agent-passport-go/verify"
 )
 
 // ActionReceipt mirrors ActionReceipt in src/types/passport.ts. Only the fields
@@ -87,6 +100,21 @@ type DelegationHop struct {
 
 // BeneficiaryTrace mirrors BeneficiaryTrace: the resolved path from an executing
 // agent back to the human beneficiary.
+//
+// Resolved and Verified are two DISTINCT, honestly-named claims, matching the TS
+// reference (src/core/attribution.ts):
+//
+//	Resolved  Lookup success only. keyChain.length>1 AND the principal maps to a
+//	          known beneficiary AND every hop's (from,to) pair maps to a known
+//	          delegation record (delegationId != "unknown"). This makes NO
+//	          cryptographic claim: a creator-supplied chain that happens to match
+//	          known records is Resolved. Do not trust it as proof of authorization.
+//
+//	Verified  Real ed25519 verification. keyChain.length>1 AND the receipt
+//	          signature is authentic against the executor key at the chain tail
+//	          AND every hop has SOME matching delegation that passes
+//	          delegation.VerifyDelegation. A forged, empty, or missing signature
+//	          makes Verified false. This is the field to trust.
 type BeneficiaryTrace struct {
 	TraceID       string          `json:"traceId"`
 	ReceiptID     string          `json:"receiptId"`
@@ -94,18 +122,60 @@ type BeneficiaryTrace struct {
 	Beneficiary   string          `json:"beneficiary"`
 	Chain         []DelegationHop `json:"chain"`
 	TotalDepth    int             `json:"totalDepth"`
+	Resolved      bool            `json:"resolved"`
 	Verified      bool            `json:"verified"`
 }
 
-// TraceDelegation is the minimal delegation shape traceBeneficiary reads:
-// delegatedBy, delegatedTo, delegationId, scope. It is declared inline here
-// rather than imported from a sibling package so this package stays
-// independent and builds in parallel.
+// TraceDelegation is the delegation shape TraceBeneficiary reads.
+//
+// PUBLIC API CHANGE (Beneficiary attribution parity): this struct was enriched
+// from the old lookup-only shape (delegationId, delegatedBy, delegatedTo, scope)
+// to carry the full field set that delegation.VerifyDelegation needs to check a
+// hop cryptographically. Signature, ExpiresAt, NotBefore, CreatedAt, MaxDepth,
+// CurrentDepth, and SpendLimit are the canonical delegation preimage fields
+// (see delegation.canonicalMap); they were added so a hop can be VERIFIED, not
+// just resolved. Callers constructing a TraceDelegation for a chain they want
+// Verified=true on MUST populate at least Signature plus the fields the
+// canonical delegation preimage includes (DelegatedBy, DelegatedTo, Scope, and
+// any timestamps/depth that were signed). Lookup-only callers that only need
+// Resolved may leave the crypto fields zero.
+//
+// The field set and JSON tags mirror types.Delegation so a types.Delegation
+// projects to a TraceDelegation without renaming.
 type TraceDelegation struct {
-	DelegationID string   `json:"delegationId"`
-	DelegatedBy  string   `json:"delegatedBy"`
-	DelegatedTo  string   `json:"delegatedTo"`
-	Scope        []string `json:"scope"`
+	DelegationID   string   `json:"delegationId"`
+	DelegatedBy    string   `json:"delegatedBy"`
+	DelegatedTo    string   `json:"delegatedTo"`
+	Scope          []string `json:"scope"`
+	SpendLimit     *float64 `json:"spendLimit,omitempty"`
+	SpendLimitUnit string   `json:"spendLimitUnit,omitempty"`
+	MaxDepth       *int     `json:"maxDepth,omitempty"`
+	CurrentDepth   *int     `json:"currentDepth,omitempty"`
+	ExpiresAt      string   `json:"expiresAt,omitempty"`
+	NotBefore      string   `json:"notBefore,omitempty"`
+	CreatedAt      string   `json:"createdAt,omitempty"`
+	Signature      string   `json:"signature,omitempty"`
+}
+
+// toTypesDelegation projects a TraceDelegation to the types.Delegation shape the
+// shared verifier consumes. The canonical delegation preimage
+// (delegation.canonicalMap) reads exactly these fields, so verification uses the
+// same bytes the delegator signed.
+func (d TraceDelegation) toTypesDelegation() types.Delegation {
+	return types.Delegation{
+		DelegationID:   d.DelegationID,
+		DelegatedBy:    d.DelegatedBy,
+		DelegatedTo:    d.DelegatedTo,
+		Scope:          d.Scope,
+		SpendLimit:     d.SpendLimit,
+		SpendLimitUnit: d.SpendLimitUnit,
+		MaxDepth:       d.MaxDepth,
+		CurrentDepth:   d.CurrentDepth,
+		ExpiresAt:      d.ExpiresAt,
+		NotBefore:      d.NotBefore,
+		CreatedAt:      d.CreatedAt,
+		Signature:      d.Signature,
+	}
 }
 
 // AttributionEntry mirrors AttributionEntry in src/types/passport.ts.
@@ -182,6 +252,24 @@ func HashReceipt(receipt ActionReceipt) (string, error) {
 // mints traceId from a random uuid, the caller supplies traceID here so the
 // result is deterministic and key/clock-free; all other fields are computed
 // exactly as the reference does.
+//
+// It reports two DISTINCT claims (see BeneficiaryTrace):
+//
+//	Resolved  Lookup only: the principal maps to a known beneficiary, there is
+//	          at least one hop, and every hop maps to a known delegation record.
+//	          No cryptographic claim.
+//
+//	Verified  Real ed25519: at least one hop, the receipt signature is authentic
+//	          against the executor at the chain tail, AND every hop has SOME
+//	          matching delegation that passes delegation.VerifyDelegation. A hop
+//	          with no valid delegation, or a forged/absent receipt signature,
+//	          breaks Verified. This reuses the canonical verifiers and does not
+//	          reimplement crypto.
+//
+// The reported chain still chooses ONE delegation per hop deterministically
+// (valid-first, then by delegationId; the tail hop prefers the delegation the
+// receipt was issued under, receipt.DelegationID), matching the TS selection so
+// the reported lineage is stable regardless of which duplicate came first.
 func TraceBeneficiary(
 	traceID string,
 	receipt ActionReceipt,
@@ -191,21 +279,68 @@ func TraceBeneficiary(
 	chain := []DelegationHop{}
 	keyChain := receipt.DelegationChain
 
+	// everyHopAuthentic is a SECURITY concern kept independent of which
+	// delegation gets reported: a hop is authentic iff SOME matching delegation
+	// passes delegation.VerifyDelegation, so a re-used (from,to) key pair cannot
+	// turn a valid lineage into verified=false, and a hop with no valid
+	// delegation still breaks Verified.
+	everyHopAuthentic := true
 	for i := 0; i+1 < len(keyChain); i++ {
 		from := keyChain[i]
 		to := keyChain[i+1]
+		isTail := i == len(keyChain)-2
+
+		type match struct {
+			del   TraceDelegation
+			valid bool
+		}
+		matches := []match{}
+		anyValid := false
+		for _, d := range delegations {
+			if d.DelegatedBy == from && d.DelegatedTo == to {
+				valid := delegation.VerifyDelegation(d.toTypesDelegation())
+				if valid {
+					anyValid = true
+				}
+				matches = append(matches, match{del: d, valid: valid})
+			}
+		}
+		if !anyValid {
+			everyHopAuthentic = false
+		}
+
+		// Deterministic reported-chain selection: valid first, then by
+		// delegationId ascending. Matches the TS sort comparator exactly.
+		ordered := make([]match, len(matches))
+		copy(ordered, matches)
+		sort.SliceStable(ordered, func(a, b int) bool {
+			if ordered[a].valid != ordered[b].valid {
+				return ordered[a].valid
+			}
+			return ordered[a].del.DelegationID < ordered[b].del.DelegationID
+		})
+
+		var chosen *match
+		if isTail {
+			for k := range ordered {
+				if ordered[k].del.DelegationID == receipt.DelegationID {
+					chosen = &ordered[k]
+					break
+				}
+			}
+		}
+		if chosen == nil && len(ordered) > 0 {
+			chosen = &ordered[0]
+		}
 
 		delegationID := "unknown"
 		scope := []string{}
-		for _, d := range delegations {
-			if d.DelegatedBy == from && d.DelegatedTo == to {
-				if d.DelegationID != "" {
-					delegationID = d.DelegationID
-				}
-				if d.Scope != nil {
-					scope = d.Scope
-				}
-				break
+		if chosen != nil {
+			if chosen.del.DelegationID != "" {
+				delegationID = chosen.del.DelegationID
+			}
+			if chosen.del.Scope != nil {
+				scope = chosen.del.Scope
 			}
 		}
 
@@ -224,28 +359,62 @@ func TraceBeneficiary(
 	}
 	beneficiary, hasBeneficiary := beneficiaryMap[principalKey]
 
-	resolved := principalKey
+	beneficiaryOut := principalKey
 	if hasBeneficiary && beneficiary.PrincipalID != "" {
-		resolved = beneficiary.PrincipalID
+		beneficiaryOut = beneficiary.PrincipalID
 	}
 
-	verified := hasBeneficiary
-	for _, h := range chain {
-		if h.DelegationID == "unknown" {
-			verified = false
-			break
+	// resolved: lookup success only, no cryptographic claim.
+	resolved := hasBeneficiary && len(keyChain) > 1
+	if resolved {
+		for _, h := range chain {
+			if h.DelegationID == "unknown" {
+				resolved = false
+				break
+			}
 		}
 	}
+
+	// verified: real cryptographic verification. The receipt must be signed by
+	// the executor at the tail of the chain, every hop must have a valid
+	// delegation, and there must be at least one hop. Absent or forged
+	// signatures => not verified.
+	var executorKey string
+	if len(keyChain) > 0 {
+		executorKey = keyChain[len(keyChain)-1]
+	}
+	receiptAuthentic := len(keyChain) > 0 && verifyReceiptSignature(receipt, executorKey)
+	verified := len(keyChain) > 1 && receiptAuthentic && everyHopAuthentic
 
 	return BeneficiaryTrace{
 		TraceID:       traceID,
 		ReceiptID:     receipt.ReceiptID,
 		ExecutorAgent: receipt.AgentID,
-		Beneficiary:   resolved,
+		Beneficiary:   beneficiaryOut,
 		Chain:         chain,
 		TotalDepth:    len(chain),
+		Resolved:      resolved,
 		Verified:      verified,
 	}
+}
+
+// verifyReceiptSignature checks the receipt signature against agentPublicKey over
+// the exact TS verifyReceipt preimage: canonicalize(receipt minus its signature
+// field), verified with ed25519. It reuses verify.VerifyCanonicalSignature so the
+// field-stripping and canonicalization have a single source of truth.
+//
+// TS verifyReceipt ALSO requires receipt.version === '1.1'. That version gate is
+// enforced here so `verified` matches the TS receiptAuthentic result byte for
+// byte: a receipt on any other version is not authentic.
+func verifyReceiptSignature(receipt ActionReceipt, agentPublicKey string) bool {
+	if receipt.Version != "1.1" {
+		return false
+	}
+	g, ok := toGeneric(receipt).(map[string]interface{})
+	if !ok {
+		return false
+	}
+	return verify.VerifyCanonicalSignature(g, "signature", receipt.Signature, agentPublicKey)
 }
 
 // VerifyAttributionReport mirrors verifyAttributionReport in attribution.ts: a
