@@ -297,21 +297,69 @@ process.stdout.write(JSON.stringify(out));
 
 // ── TraceBeneficiary ───────────────────────────────────────────────────────
 
-// TestTraceBeneficiaryCrossImpl compares the Go trace (minus the random traceId,
-// which the reference mints from a uuid) against the live TS trace minus its
-// traceId, on identical deterministic inputs.
-func TestTraceBeneficiaryCrossImpl(t *testing.T) {
-	skipUnlessTSRepo(t)
-	receipt := fixtureReceipt()
-	delegations := []TraceDelegation{
-		{DelegationID: "del_pa", DelegatedBy: "pk_principal", DelegatedTo: "pk_agent", Scope: []string{"compute:exec"}},
+// signedTraceFixture builds a real signed receipt + a real signed delegation
+// chain from two deterministic seeds, so both `resolved` and `verified` are
+// true under the honest split semantics (lookup AND real ed25519). It mirrors
+// the exact literals the TS oracle signs in TestTraceBeneficiaryCrossImpl, so
+// Ed25519's determinism yields byte-identical signatures across the two impls.
+//
+// The delegation literal deliberately OMITS spentAmount (unlike TS
+// createDelegation, which bakes in spentAmount:0), because the canonical
+// delegation preimage shared with delegation.CreateDelegation / VerifyDelegation
+// carries no spentAmount field. Both sides sign the same field set, so the
+// cross-impl signature is identical.
+func signedTraceFixture(t *testing.T) (receipt ActionReceipt, delegations []TraceDelegation, bmap map[string]BeneficiaryInfo, principalPub, agentPub string) {
+	t.Helper()
+	principalSeed := seedFromLabel("aps-go-trace-principal")
+	agentSeed := seedFromLabel("aps-go-trace-agent")
+	var err error
+	principalPub, err = keys.PublicKeyFromPrivate(principalSeed)
+	if err != nil {
+		t.Fatalf("principal pub: %v", err)
 	}
-	bmap := map[string]BeneficiaryInfo{
-		"pk_principal": {PrincipalID: "human_alice", Relationship: "owner", RegisteredAt: "2026-01-01T00:00:00Z"},
+	agentPub, err = keys.PublicKeyFromPrivate(agentSeed)
+	if err != nil {
+		t.Fatalf("agent pub: %v", err)
 	}
 
+	del := signTraceDelegation(t, principalSeed, "del_pa", principalPub, agentPub, []string{"compute:exec"})
+	delegations = []TraceDelegation{del}
+
+	receipt = ActionReceipt{
+		ReceiptID:    "rcpt_001",
+		Version:      "1.1",
+		Timestamp:    "2026-06-03T12:00:00Z",
+		AgentID:      "ag_exec",
+		DelegationID: "del_pa",
+		Action: ReceiptAction{
+			Type:      "code_execution",
+			Target:    "repo/x",
+			ScopeUsed: "compute:exec",
+		},
+		Result:          ReceiptResult{Status: "success", Summary: "done"},
+		DelegationChain: []string{principalPub, agentPub},
+	}
+	receipt.Signature = signReceipt(t, receipt, agentSeed)
+
+	bmap = map[string]BeneficiaryInfo{
+		principalPub: {PrincipalID: "human_alice", Relationship: "owner", RegisteredAt: "2026-01-01T00:00:00Z"},
+	}
+	return receipt, delegations, bmap, principalPub, agentPub
+}
+
+// TestTraceBeneficiaryCrossImpl compares the Go trace (minus the random traceId,
+// which the reference mints from a uuid) against the live TS trace minus its
+// traceId, on identical deterministic inputs. The fixture is a REAL signed
+// receipt + delegation chain so both resolved and verified are true. This test
+// goes RED against the old lookup-only Verified (no Resolved field, verified
+// asserted from a placeholder signature) and GREEN once Verified does real
+// ed25519 crypto and Resolved is reported.
+func TestTraceBeneficiaryCrossImpl(t *testing.T) {
+	skipUnlessTSRepo(t)
+	receipt, delegations, bmap, principalPub, agentPub := signedTraceFixture(t)
+
 	got := TraceBeneficiary("trace_fixed", receipt, delegations, bmap)
-	if got.Beneficiary != "human_alice" || !got.Verified || got.TotalDepth != 1 {
+	if got.Beneficiary != "human_alice" || !got.Resolved || !got.Verified || got.TotalDepth != 1 {
 		t.Fatalf("unexpected trace: %+v", got)
 	}
 
@@ -319,21 +367,37 @@ func TestTraceBeneficiaryCrossImpl(t *testing.T) {
 	goRest := traceRestJSON(t, got)
 
 	live := runTSX(t, `
+import { createHash } from 'node:crypto';
+import { sign, publicKeyFromPrivate } from '`+tsRepo+`/src/crypto/keys.ts';
+import { canonicalize } from '`+tsRepo+`/src/core/canonical.ts';
 import { traceBeneficiary } from '`+tsRepo+`/src/core/attribution.ts';
-const receipt = {
-  receiptId: 'rcpt_001', version: '1.0.0', timestamp: '2026-06-03T12:00:00Z',
-  agentId: 'ag_exec', delegationId: 'del_001',
+const principalSeed = createHash('sha256').update('aps-go-trace-principal').digest('hex');
+const agentSeed = createHash('sha256').update('aps-go-trace-agent').digest('hex');
+const principalPub = publicKeyFromPrivate(principalSeed);
+const agentPub = publicKeyFromPrivate(agentSeed);
+const delegationUnsigned = {
+  delegationId: 'del_pa', delegatedTo: agentPub, delegatedBy: principalPub,
+  scope: ['compute:exec'], expiresAt: '2099-01-01T00:00:00.000Z',
+  maxDepth: 1, currentDepth: 0,
+  createdAt: '2026-01-01T00:00:00.000Z', notBefore: '2026-01-01T00:00:00.000Z'
+};
+const delegation = { ...delegationUnsigned, signature: sign(canonicalize(delegationUnsigned), principalSeed) };
+const receiptUnsigned = {
+  receiptId: 'rcpt_001', version: '1.1', timestamp: '2026-06-03T12:00:00Z',
+  agentId: 'ag_exec', delegationId: 'del_pa',
   action: { type: 'code_execution', target: 'repo/x', scopeUsed: 'compute:exec' },
   result: { status: 'success', summary: 'done' },
-  delegationChain: ['pk_principal','pk_agent'], signature: 'sig_placeholder'
+  delegationChain: [principalPub, agentPub]
 };
-const delegations = [{ delegationId: 'del_pa', delegatedBy: 'pk_principal', delegatedTo: 'pk_agent', scope: ['compute:exec'] }];
+const receipt = { ...receiptUnsigned, signature: sign(canonicalize(receiptUnsigned), agentSeed) };
 const bmap = new Map();
-bmap.set('pk_principal', { principalId: 'human_alice', relationship: 'owner', registeredAt: '2026-01-01T00:00:00Z' });
-const trace = traceBeneficiary(receipt, delegations, bmap);
+bmap.set(principalPub, { principalId: 'human_alice', relationship: 'owner', registeredAt: '2026-01-01T00:00:00Z' });
+const trace = traceBeneficiary(receipt, [delegation], bmap);
 const { traceId, ...rest } = trace;
 process.stdout.write(JSON.stringify(rest));
 `)
+	_ = principalPub
+	_ = agentPub
 	// Re-canonicalize both sides through JSON so key order does not matter.
 	if canonJSON(t, live) != canonJSON(t, goRest) {
 		t.Fatalf("trace mismatch (Go != TS)\n Go: %s\n TS: %s", goRest, live)

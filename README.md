@@ -34,7 +34,11 @@ Issuing and signing (Waves 2+3):
 - **completion** - create and verify completion receipts, link a permit to a
   completion.
 - **attribution** - the beneficiary-attribution primitives: hash a receipt, build
-  a Merkle root, generate and verify Merkle proofs, trace a beneficiary.
+  a Merkle root, generate and verify Merkle proofs, trace a beneficiary. The
+  trace reports two distinct claims: `resolved` (lookup only, no cryptographic
+  claim) and `verified` (real ed25519 verification of the receipt signature and
+  every delegation hop). `TraceDelegation` carries the full canonical delegation
+  preimage (signature, scope, timestamps, depth) so a hop can be verified.
 - **values** - values-floor: load, attest, verify an attestation, evaluate
   compliance, resolve an enforcement mode.
 - **coordination** - signed-message create/verify pairs (task brief, assign,

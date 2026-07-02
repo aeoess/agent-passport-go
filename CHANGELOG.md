@@ -27,8 +27,28 @@ separate step. Cross-language parity reference: TypeScript SDK v2.9.0.
   `not_after` is now rejected.
 - **`VerifyDelegationChain` narrowing checks** (`verify/verify.go`): the chain check now enforces a
   monotonic depth increment, spend-unit narrowing, and a present child expiry.
+- **`TraceBeneficiary` verified now does real crypto** (`attribution/attribution.go`). `Verified` was
+  set from lookup success alone (a known beneficiary plus a known delegationId on every hop) and checked
+  NO signature, so a creator-supplied or forged chain that happened to match known records reported
+  `verified=true`. It now matches the TypeScript reference honest split: `Verified` requires at least one
+  hop, an authentic receipt signature against the executor key at the chain tail, and every hop backed by
+  some delegation that passes `delegation.VerifyDelegation` (ed25519). A forged, empty, or missing
+  signature makes `verified=false`. The reused canonical verifiers (`delegation`, `verify`, `jcs`,
+  `keys`) mean this package is no longer standalone on the trace path.
+
+### Public API changes
+- **`BeneficiaryTrace` gained a `Resolved bool` (`json:"resolved"`) field** (`attribution/attribution.go`),
+  matching the TypeScript reference. `Resolved` is the previous lookup-only semantics, honestly renamed:
+  it makes no cryptographic claim. `Verified` is now the field to trust.
+- **`TraceDelegation` was enriched** (`attribution/attribution.go`) from the lookup-only shape
+  (`delegationId`, `delegatedBy`, `delegatedTo`, `scope`) to carry the full canonical delegation preimage
+  (`signature`, `spendLimit`, `spendLimitUnit`, `maxDepth`, `currentDepth`, `expiresAt`, `notBefore`,
+  `createdAt`) so a hop can be cryptographically verified, not just resolved. Callers that need
+  `Verified=true` must populate at least `Signature` plus the signed preimage fields.
 
 ### Behavior changes (operations previously permitted now fail closed)
+- A beneficiary trace over a forged, unsigned, or otherwise unauthentic receipt/delegation chain now
+  reports `verified=false` instead of `verified=true`; `resolved` still reflects lookup success only.
 - A cross-currency commerce spend (purchase currency differs from the budget currency) is now denied
   instead of passing.
 - A sub-delegation from a parent whose signature does not verify is now rejected instead of produced.
