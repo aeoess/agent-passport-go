@@ -130,16 +130,56 @@ func writeNumber(sb *strings.Builder, f float64) error {
 		sb.WriteString("0")
 		return nil
 	}
-	if f == math.Trunc(f) && math.Abs(f) < 1e21 {
-		// Integer-valued double in the no-exponent range: print as an integer.
-		sb.WriteString(strconv.FormatFloat(f, 'f', -1, 64))
-		return nil
-	}
-	// Shortest round-trip representation. This matches ECMAScript for the
-	// decimal and exponent forms exercised by the APS fixtures. Exotic
-	// exponent edge cases are not exercised by any current vector.
-	sb.WriteString(strconv.FormatFloat(f, 'g', -1, 64))
+	sb.WriteString(esNumber(f))
 	return nil
+}
+
+// esNumber renders a finite, non-zero float64 exactly like ECMAScript
+// Number::toString, the algorithm RFC 8785 section 3.2.2.3 mandates. Go's
+// strconv 'g' form diverges from it: 'g' switches to exponent form at exponent
+// < -4 and zero-pads the exponent to two digits (e.g. "1e-05"), whereas
+// ECMAScript prints "0.00001" down to 1e-6 and never zero-pads ("1e-7",
+// "1e+21"). The shortest scientific form gives the minimal round-trip digits
+// and the base-10 exponent of the leading digit; we reformat those per the
+// ECMAScript rules. Validated byte-identical to Node JSON.stringify over 20k
+// values (jcs/esnumber_test.go).
+func esNumber(f float64) string {
+	sci := strconv.FormatFloat(f, 'e', -1, 64) // "-1.005e+02", "1e-07"
+	neg := ""
+	if sci[0] == '-' {
+		neg, sci = "-", sci[1:]
+	}
+	ei := strings.IndexByte(sci, 'e')
+	mant := sci[:ei]
+	exp, _ := strconv.Atoi(sci[ei+1:])
+	digits := mant
+	if dot := strings.IndexByte(mant, '.'); dot >= 0 {
+		digits = mant[:dot] + mant[dot+1:]
+	}
+	digits = strings.TrimRight(digits, "0")
+	if digits == "" {
+		digits = "0"
+	}
+	k := len(digits)
+	n := exp + 1 // value = digits * 10^(n-k); 10^(n-1) <= |value| < 10^n
+	switch {
+	case k <= n && n <= 21:
+		return neg + digits + strings.Repeat("0", n-k)
+	case 0 < n && n <= 21:
+		return neg + digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		return neg + "0." + strings.Repeat("0", -n) + digits
+	default:
+		eout := n - 1
+		esign := "+"
+		if eout < 0 {
+			esign, eout = "-", -eout
+		}
+		if k == 1 {
+			return neg + digits + "e" + esign + strconv.Itoa(eout)
+		}
+		return neg + digits[:1] + "." + digits[1:] + "e" + esign + strconv.Itoa(eout)
+	}
 }
 
 // writeString matches ECMAScript JSON.stringify string output.

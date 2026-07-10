@@ -128,6 +128,18 @@ func ValidateChain(in ChainInput) string {
 			return CodeInvalidSig
 		}
 		if i > 0 {
+			// Chain continuity: each link must be issued by the previous link's
+			// delegatee, so a link cannot be authenticated by an arbitrary key
+			// it names as its own delegator. Without this, a chain of
+			// independently self-signed links (each signed by whatever key it
+			// names) passes every other gate. An unauthorized issuer is an
+			// invalid signature in the chain sense. (The typed
+			// ValidateDelegationChain below enforces the same
+			// delegatedBy==delegatedTo invariant.)
+			prevDelegatee, _ := in.Chain[i-1]["delegatee"].(string)
+			if prevDelegatee == "" || delegator == "" || delegator != prevDelegatee {
+				return CodeInvalidSig
+			}
 			if scopeExpands(in.Chain[i-1], link) {
 				return CodeInvalidScope
 			}
