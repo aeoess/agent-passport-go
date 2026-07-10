@@ -54,9 +54,20 @@ func canonicalMap(d types.Delegation) map[string]interface{} {
 		"delegatedTo":  d.DelegatedTo,
 		"delegatedBy":  d.DelegatedBy,
 		"scope":        scope,
-		"expiresAt":    d.ExpiresAt,
-		"notBefore":    d.NotBefore,
-		"createdAt":    d.CreatedAt,
+	}
+	// Optional timestamps are omitted when empty, matching the struct's
+	// `omitempty` json tags. Including "expiresAt":"" here (the prior behavior)
+	// signed a key the wire JSON drops, so a Go-issued delegation with an empty
+	// optional timestamp did not round-trip: a verifier canonicalizing the
+	// received (key-omitted) object computed different bytes.
+	if d.ExpiresAt != "" {
+		m["expiresAt"] = d.ExpiresAt
+	}
+	if d.NotBefore != "" {
+		m["notBefore"] = d.NotBefore
+	}
+	if d.CreatedAt != "" {
+		m["createdAt"] = d.CreatedAt
 	}
 	if d.SpendLimit != nil {
 		m["spendLimit"] = *d.SpendLimit
