@@ -62,3 +62,74 @@ func TestActionRefStableUnderTimestampPrecision(t *testing.T) {
 		t.Error("Match should report true for identical action_ref")
 	}
 }
+
+// TestActionRefScopesOrderInsensitive mirrors T1 case (a): unsorted multi-scope
+// ASCII input produces the same ref as sorted input.
+func TestActionRefScopesOrderInsensitive(t *testing.T) {
+	a, err := ComputeActionRefScopes("ag_x", "commerce_preflight", []string{"commerce:write", "commerce:read"}, "2026-06-02T12:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ComputeActionRefScopes("ag_x", "commerce_preflight", []string{"commerce:read", "commerce:write"}, "2026-06-02T12:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Errorf("scope order changed action_ref: %s vs %s", a, b)
+	}
+}
+
+// TestActionRefScopesNFCEquivalence mirrors T1 case (b): NFD and NFC forms of
+// the same scope produce equal refs. "cafe" plus U+0301 combining acute is the
+// NFD form of the precomposed U+00E9 form.
+func TestActionRefScopesNFCEquivalence(t *testing.T) {
+	nfd := "cafe\u0301:read"
+	nfc := "caf\u00e9:read"
+	a, err := ComputeActionRefScopes("ag_x", "web_search", []string{nfd}, "2026-06-02T12:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ComputeActionRefScopes("ag_x", "web_search", []string{nfc}, "2026-06-02T12:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Errorf("NFD and NFC forms produced different refs: %s vs %s", a, b)
+	}
+	// The single-string legacy form gets the same NFC treatment.
+	c, err := ComputeActionRef("ag_x", "web_search", nfd, "2026-06-02T12:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := ComputeActionRef("ag_x", "web_search", nfc, "2026-06-02T12:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c != d {
+		t.Errorf("legacy form: NFD and NFC produced different refs: %s vs %s", c, d)
+	}
+}
+
+// TestActionRefScopesCodePointOrder mirrors T1 case (c): a scope containing an
+// astral-plane character (U+10000) sorts AFTER a scope in the U+E000..U+FFFF
+// range under code-point order. A UTF-16 code-unit sort would misorder these,
+// because U+10000 encodes as a surrogate pair starting at 0xD800, which is
+// below 0xE000. sort.Strings on UTF-8 bytes gives the code-point order the
+// spec requires.
+func TestActionRefScopesCodePointOrder(t *testing.T) {
+	astral := "\U00010000:x"
+	bmpHigh := "\ue000:x"
+	got := CanonicalizeScopes([]string{astral, bmpHigh})
+	if got[0] != bmpHigh || got[1] != astral {
+		t.Errorf("code-point order violated: got %q first, want %q first", got[0], bmpHigh)
+	}
+}
+
+// TestCanonicalizeScopesDoesNotMutateCaller pins the copied-slice requirement.
+func TestCanonicalizeScopesDoesNotMutateCaller(t *testing.T) {
+	in := []string{"b:scope", "a:scope"}
+	_ = CanonicalizeScopes(in)
+	if in[0] != "b:scope" || in[1] != "a:scope" {
+		t.Errorf("caller slice mutated: %v", in)
+	}
+}
