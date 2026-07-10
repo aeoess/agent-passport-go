@@ -40,7 +40,13 @@ func loadVectors(t *testing.T) (string, []canonicalVector) {
 	}
 	var vecs []canonicalVector
 	if err := json.Unmarshal(data, &vecs); err != nil {
-		t.Fatalf("parse %s: %v", path, err)
+		var wrapped struct {
+			Vectors []canonicalVector `json:"vectors"`
+		}
+		if werr := json.Unmarshal(data, &wrapped); werr != nil {
+			t.Fatalf("parse %s: %v (wrapper: %v)", path, err, werr)
+		}
+		vecs = wrapped.Vectors
 	}
 	if len(vecs) == 0 {
 		t.Fatalf("vector file %s is empty", path)
