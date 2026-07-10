@@ -1,0 +1,66 @@
+[
+  {
+    "name": "single-scope-ascii",
+    "input": {
+      "agentId": "ag_test_001",
+      "actionType": "code_execution",
+      "scopeRequired": [
+        "compute:exec"
+      ],
+      "timestamp": "2026-06-02T12:00:00.000Z"
+    },
+    "canonical_scope_order": [
+      "compute:exec"
+    ],
+    "action_ref": "20dbd9d26d27803d090d7620a52d74164de1fdd978b397efa6cf72430250cf64"
+  },
+  {
+    "name": "multi-scope-unsorted-ascii",
+    "input": {
+      "agentId": "ag_test_001",
+      "actionType": "commerce_preflight",
+      "scopeRequired": [
+        "commerce:write",
+        "commerce:read"
+      ],
+      "timestamp": "2026-06-02T12:00:00Z"
+    },
+    "canonical_scope_order": [
+      "commerce:read",
+      "commerce:write"
+    ],
+    "action_ref": "1d6b3e1b83f3146bacb0a213b446c29d35cc37a7941274d5647be3b816094268"
+  },
+  {
+    "name": "nfd-scope-normalizes-to-nfc",
+    "input": {
+      "agentId": "ag_test_001",
+      "actionType": "web_search",
+      "scopeRequired": [
+        "café:read"
+      ],
+      "timestamp": "2026-06-02T12:00:00Z"
+    },
+    "canonical_scope_order": [
+      "café:read"
+    ],
+    "action_ref": "4327c4713727e1839c6721bfbf22fd97c61f770943c4398871db1fcf063d1f91"
+  },
+  {
+    "name": "astral-after-bmp-high-code-point-order",
+    "input": {
+      "agentId": "ag_test_001",
+      "actionType": "code_execution",
+      "scopeRequired": [
+        "𐀀:x",
+        ":x"
+      ],
+      "timestamp": "2026-06-02T12:00:00Z"
+    },
+    "canonical_scope_order": [
+      ":x",
+      "𐀀:x"
+    ],
+    "action_ref": "723c6d72f9f505728dea15b839cd8e04a8956eec9a2f78272eeb2b6518ce60d4"
+  }
+]
