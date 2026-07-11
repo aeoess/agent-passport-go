@@ -52,3 +52,25 @@ func TestChainRejectsMissingChildExpiry(t *testing.T) {
 		t.Fatal("child with no expiry under a parent that has one must be rejected")
 	}
 }
+
+// A non-empty but unparseable child expiry must fail closed. Gating the outlives comparison
+// on both sides parsing let a garbage child expiry (parse error) skip temporal narrowing and
+// outlive its parent, an aud-class fail-open.
+func TestChainRejectsUnparseableChildExpiry(t *testing.T) {
+	root := types.Delegation{DelegatedBy: "root", DelegatedTo: "a", Scope: []string{"x"}, MaxDepth: npI(5), CurrentDepth: npI(0), ExpiresAt: "2030-01-01T00:00:00.000Z"}
+	garbage := types.Delegation{DelegatedBy: "a", DelegatedTo: "b", Scope: []string{"x"}, MaxDepth: npI(5), CurrentDepth: npI(1), ExpiresAt: "not-a-timestamp"}
+	if err := VerifyDelegationChain([]types.Delegation{root, garbage}); err == nil {
+		t.Fatal("child with a non-empty unparseable expiry must be rejected (fail closed)")
+	}
+	// A non-empty but unparseable parent expiry must also fail closed.
+	badParent := types.Delegation{DelegatedBy: "root", DelegatedTo: "a", Scope: []string{"x"}, MaxDepth: npI(5), CurrentDepth: npI(0), ExpiresAt: "garbage"}
+	child := types.Delegation{DelegatedBy: "a", DelegatedTo: "b", Scope: []string{"x"}, MaxDepth: npI(5), CurrentDepth: npI(1), ExpiresAt: "2029-01-01T00:00:00.000Z"}
+	if err := VerifyDelegationChain([]types.Delegation{badParent, child}); err == nil {
+		t.Fatal("parent with a non-empty unparseable expiry must be rejected (fail closed)")
+	}
+	// A well-formed narrowing chain (child expires before parent) must still pass.
+	good := types.Delegation{DelegatedBy: "a", DelegatedTo: "b", Scope: []string{"x"}, MaxDepth: npI(5), CurrentDepth: npI(1), ExpiresAt: "2029-01-01T00:00:00.000Z"}
+	if err := VerifyDelegationChain([]types.Delegation{root, good}); err != nil {
+		t.Fatalf("well-formed temporal narrowing must pass: %v", err)
+	}
+}

@@ -262,14 +262,33 @@ func VerifyDelegationChain(chain []types.Delegation) error {
 			return errors.New("spend unit change: child must carry the parent spendLimitUnit unchanged")
 		}
 		// Temporal narrowing: a child may not outlive its parent. A missing child expiry must not
-		// bypass the check when the parent has one.
+		// bypass the check when the parent has one. A non-empty but UNPARSEABLE expiry on either
+		// side must fail closed (invalidate the chain), never be silently skipped: gating the
+		// outlives comparison on both sides parsing let a garbage child expiry slip through and
+		// outlive its parent.
+		var pe int64
+		var haveParentExpiry bool
 		if parent.ExpiresAt != "" {
-			if child.ExpiresAt == "" {
+			p, ok := parseMillis(parent.ExpiresAt)
+			if !ok {
+				return errors.New("expiry unparseable: parent expiresAt is non-empty but invalid")
+			}
+			pe, haveParentExpiry = p, true
+		}
+		var ce int64
+		var haveChildExpiry bool
+		if child.ExpiresAt != "" {
+			c, ok := parseMillis(child.ExpiresAt)
+			if !ok {
+				return errors.New("expiry unparseable: child expiresAt is non-empty but invalid")
+			}
+			ce, haveChildExpiry = c, true
+		}
+		if haveParentExpiry {
+			if !haveChildExpiry {
 				return errors.New("expiry widening: child has no expiry but parent does")
 			}
-			pe, perr := parseMillis(parent.ExpiresAt)
-			ce, cerr := parseMillis(child.ExpiresAt)
-			if perr && cerr && ce > pe {
+			if ce > pe {
 				return errors.New("expiry widening: child outlives parent")
 			}
 		}
