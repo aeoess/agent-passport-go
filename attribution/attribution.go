@@ -457,34 +457,55 @@ func VerifyAttributionReport(report AttributionReport, publicKey string) (bool, 
 	return len(errs) == 0, errs
 }
 
+// Domain separation (CVE-2012-2459 class). Leaves are hashed under a 0x00
+// prefix and internal nodes under a 0x01 prefix so an internal node value can
+// never be reinterpreted as a leaf. Odd nodes are promoted unchanged rather
+// than duplicated (RFC 6962 style), so distinct receipt multisets (for
+// example [a,b,c] versus [a,b,c,c]) can never fold to the same root.
+// Byte-identical to hashLeafNode / hashInternalNode in attribution.ts.
+func hashLeafNode(leaf string) string {
+	return sha256Hex("\x00" + leaf)
+}
+
+func hashInternalNode(left, right string) string {
+	return sha256Hex("\x01" + left + right)
+}
+
+// reduceMerkleLevel folds one tree level: adjacent pairs hash under the
+// internal-node tag; a trailing odd node is promoted unchanged, never
+// duplicated.
+func reduceMerkleLevel(level []string) []string {
+	next := make([]string, 0, (len(level)+1)/2)
+	for i := 0; i < len(level); i += 2 {
+		if i+1 < len(level) {
+			next = append(next, hashInternalNode(level[i], level[i+1]))
+		} else {
+			next = append(next, level[i])
+		}
+	}
+	return next
+}
+
 // BuildMerkleRoot builds a Merkle root from leaf hashes, byte-identical to
-// buildMerkleRoot in attribution.ts. Empty input returns sha256("empty"); a
-// single leaf returns itself; otherwise leaves are sorted ascending (string
-// order), then paired left+right with the last node duplicated on odd levels
-// (Bitcoin-style), hashing sha256(left + right) on string concatenation.
+// buildMerkleRoot in attribution.ts. Empty input returns sha256("empty");
+// otherwise leaves are sorted ascending (string order) for determinism,
+// hashed under the 0x00 leaf tag, then folded pairwise under the 0x01
+// internal-node tag with an odd trailing node promoted unchanged. A single
+// leaf therefore yields sha256(0x00 || leaf), not the leaf itself.
 func BuildMerkleRoot(leafHashes []string) string {
 	if len(leafHashes) == 0 {
 		return sha256Hex("empty")
-	}
-	if len(leafHashes) == 1 {
-		return leafHashes[0]
 	}
 
 	level := make([]string, len(leafHashes))
 	copy(level, leafHashes)
 	sort.Strings(level)
+	for i := range level {
+		level[i] = hashLeafNode(level[i])
+	}
 
 	for len(level) > 1 {
-		next := make([]string, 0, (len(level)+1)/2)
-		for i := 0; i < len(level); i += 2 {
-			left := level[i]
-			right := left
-			if i+1 < len(level) {
-				right = level[i+1]
-			}
-			next = append(next, sha256Hex(left+right))
-		}
-		level = next
+		level = reduceMerkleLevel(level)
 	}
 
 	return level[0]
@@ -492,8 +513,10 @@ func BuildMerkleRoot(leafHashes []string) string {
 
 // GenerateMerkleProof builds an inclusion proof for targetHash, byte-identical
 // to generateMerkleProof in attribution.ts. It returns nil when the leaf set is
-// empty or the target is not present. The sibling-selection and odd-node logic
-// match the reference exactly so a Go proof recomputes the same root.
+// empty or the target is not present. A lone odd node at any level is promoted
+// unchanged: it has no sibling, so it contributes no proof node at that level.
+// A single-leaf tree therefore yields an empty proof whose root is the
+// domain-separated leaf hash.
 func GenerateMerkleProof(leafHashes []string, targetHash string) *MerkleProof {
 	if len(leafHashes) == 0 {
 		return nil
@@ -509,38 +532,28 @@ func GenerateMerkleProof(leafHashes []string, targetHash string) *MerkleProof {
 	}
 
 	proof := []MerkleProofNode{}
-	level := sorted
+	level := make([]string, len(sorted))
+	for i, leaf := range sorted {
+		level[i] = hashLeafNode(leaf)
+	}
 	index := targetIndex
 
 	for len(level) > 1 {
-		var sibling int
-		if index%2 == 0 {
-			sibling = index + 1
-		} else {
-			sibling = index - 1
+		isRightChild := index%2 == 1
+		siblingIndex := index + 1
+		if isRightChild {
+			siblingIndex = index - 1
 		}
 
-		if sibling < len(level) && sibling != index {
-			pos := "left"
-			if index%2 == 0 {
-				pos = "right"
+		if siblingIndex < len(level) {
+			pos := "right"
+			if isRightChild {
+				pos = "left"
 			}
-			proof = append(proof, MerkleProofNode{Hash: level[sibling], Position: pos})
-		} else {
-			proof = append(proof, MerkleProofNode{Hash: level[index], Position: "right"})
+			proof = append(proof, MerkleProofNode{Hash: level[siblingIndex], Position: pos})
 		}
 
-		next := make([]string, 0, (len(level)+1)/2)
-		for i := 0; i < len(level); i += 2 {
-			left := level[i]
-			right := left
-			if i+1 < len(level) {
-				right = level[i+1]
-			}
-			next = append(next, sha256Hex(left+right))
-		}
-
-		level = next
+		level = reduceMerkleLevel(level)
 		index = index / 2
 	}
 
@@ -552,20 +565,32 @@ func GenerateMerkleProof(leafHashes []string, targetHash string) *MerkleProof {
 	}
 }
 
-// VerifyMerkleProof recomputes the root from the leaf hash and proof and
-// compares it against the claimed root, byte-identical to verifyMerkleProof in
-// attribution.ts: a "left" sibling hashes sha256(sibling + acc), a "right"
-// sibling hashes sha256(acc + sibling).
+// VerifyMerkleProof recomputes the root from the domain-separated leaf hash
+// and proof path and compares it against the proof's embedded root,
+// byte-identical to verifyMerkleProof in attribution.ts: a "left" sibling
+// hashes sha256(0x01 || sibling || acc), a "right" sibling hashes
+// sha256(0x01 || acc || sibling). The embedded root is claimed by the proof
+// itself; callers holding an independently trusted root should use
+// VerifyMerkleProofAgainstRoot.
 func VerifyMerkleProof(proof MerkleProof) bool {
-	hash := proof.ReceiptHash
+	return VerifyMerkleProofAgainstRoot(proof, proof.Root)
+}
+
+// VerifyMerkleProofAgainstRoot recomputes the root from the proof and compares
+// it against a caller-supplied trusted root, ignoring the proof's embedded
+// root field. An empty proof path recomputes to sha256(0x00 || leaf), so it is
+// accepted only for the single-leaf tree whose committed root IS that value;
+// against any multi-leaf root an empty proof is rejected.
+func VerifyMerkleProofAgainstRoot(proof MerkleProof, trustedRoot string) bool {
+	hash := hashLeafNode(proof.ReceiptHash)
 	for _, node := range proof.Proof {
 		if node.Position == "left" {
-			hash = sha256Hex(node.Hash + hash)
+			hash = hashInternalNode(node.Hash, hash)
 		} else {
-			hash = sha256Hex(hash + node.Hash)
+			hash = hashInternalNode(hash, node.Hash)
 		}
 	}
-	return hash == proof.Root
+	return hash == trustedRoot
 }
 
 // verifyReportSignature checks the report signature over the canonical bytes of

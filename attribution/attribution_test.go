@@ -165,10 +165,14 @@ func TestBuildMerkleRootCrossImpl(t *testing.T) {
 		leaves []string
 		want   string // produced by TS reference buildMerkleRoot at build time
 	}{
-		{"even5", []string{"ee", "aa", "cc", "bb", "dd"}, "efe21713b2b76d0de2e8cf9be6e3a457bc0ec258b2b996a7fbe96f0f83c9b02f"},
-		{"odd3", []string{"z1", "z2", "z3"}, "7d4b72cbcf355f627f631066dac6db2508f7163a932c6f1faf2e087ff07b61ec"},
+		// Pinned values regenerated 2026-07-11 (Day-145 audit, receipt format
+		// v1.1 -> v1.2) from the domain-separated TS reference (leaf tag 0x00,
+		// node tag 0x01, odd node promoted unchanged). A single leaf now
+		// hashes under the leaf tag instead of passing through.
+		{"even5", []string{"ee", "aa", "cc", "bb", "dd"}, "a7e88df9557e8d7b30bf37ac4ce18684f032a78249ab3c9d9b39555cc8d63620"},
+		{"odd3", []string{"z1", "z2", "z3"}, "2e929d3177b7f07074571158a9060ab10f7b0031b0927c121b724773c2ba3674"},
 		{"empty", []string{}, "2e1cfa82b035c26cbbbdae632cea070514eb8b773f616aaeaf668e2f0be8f10d"},
-		{"single", []string{"solo"}, "solo"},
+		{"single", []string{"solo"}, "9e1aa6e57d3133fa3a54ae7e99acb0fea339327259f24f1317e9099e94d965c3"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -215,8 +219,12 @@ func TestMerkleProofCrossImpl(t *testing.T) {
 	odd := []string{"z1", "z2", "z3"}
 
 	// Pinned full proof JSON produced by TS generateMerkleProof at build time.
-	const tsEvenProof = `{"receiptHash":"cc","root":"efe21713b2b76d0de2e8cf9be6e3a457bc0ec258b2b996a7fbe96f0f83c9b02f","proof":[{"hash":"dd","position":"right"},{"hash":"486b34250bd4400c0aa90516fce9a9c0633a922eb40d0828cf299bc4e825acf4","position":"left"},{"hash":"f075eb2d8ea2cd08395ab19f3e90d1a09d8d7821e0d1ca31409f47ed33e4b79d","position":"right"}],"index":2}`
-	const tsOddProof = `{"receiptHash":"z3","root":"7d4b72cbcf355f627f631066dac6db2508f7163a932c6f1faf2e087ff07b61ec","proof":[{"hash":"z3","position":"right"},{"hash":"c6c91f162a8fda52e8069a57c8968849145657cef0d07b263c967f181787a9ce","position":"left"}],"index":2}`
+	// Regenerated 2026-07-11 (Day-145 audit, receipt format v1.1 -> v1.2) from
+	// the domain-separated TS reference. The odd proof now carries a single
+	// node: the lone odd leaf is promoted unchanged and contributes no
+	// self-duplicate proof entry.
+	const tsEvenProof = `{"receiptHash":"cc","root":"a7e88df9557e8d7b30bf37ac4ce18684f032a78249ab3c9d9b39555cc8d63620","proof":[{"hash":"f68f271d79f737d2e97b8f327a3e554f42452c27c39028c3de569a55e20a5ef6","position":"right"},{"hash":"41cccca33c4ab9beac49f38f89ce9927a2839825da89e01c6fdb19c83bfabe3e","position":"left"},{"hash":"2463b6d83b3f4b640b7d2e4b995d726657ce4a8b235576e6ecdcda9eae1d8c0b","position":"right"}],"index":2}`
+	const tsOddProof = `{"receiptHash":"z3","root":"2e929d3177b7f07074571158a9060ab10f7b0031b0927c121b724773c2ba3674","proof":[{"hash":"577e9da927d8dc7f8536d2da141f922c92212084b4bce10ee78cee05ad4be8ce","position":"left"}],"index":2}`
 
 	// Go proof must serialize byte-identically to the TS proof JSON.
 	goEven := GenerateMerkleProof(even, "cc")
@@ -421,9 +429,14 @@ func TestAttributionReportCrossImpl(t *testing.T) {
 
 	// Pinned values produced by the TS reference at build time (sign over
 	// canonicalize(report minus signature); seed = sha256("aps-go-attribution-key")).
+	// tsCanonSHA and tsSig regenerated 2026-07-11 (Day-145 audit, receipt
+	// format v1.1 -> v1.2): the report preimage embeds merkleRoot =
+	// buildMerkleRoot(['rh1','rh2']), whose value moved with the
+	// domain-separated Merkle construction. entriesHash carries no Merkle
+	// material and is unchanged.
 	const (
-		tsCanonSHA    = "b82808f6461845717d9352341753d5a41c23c39446f243c9736d73562aeabbe5"
-		tsSig         = "4bacc2c442b9992e392deea8668083a57e959593e9289f01cf546502536be3bfc103bf00804b1c9e5a7758cf6d1f3800d5ec02159d4b031b1b585d2b68087106"
+		tsCanonSHA    = "ee75fb9c1f3202a5b09dc243a01bda304ed13572f73f90a7211bec7b1e04a100"
+		tsSig         = "8c53c181e570ed777615ccb435470e96ed835db91ab344b9b0bbdb608385fc836ecd0f75554f1e6a0d45769afce7bab6d5f37a83acb5c1478dcf92ec71d39909"
 		tsEntriesHash = "dea9dca26512375d77e506b0eb91ba6085362bd87c709e88bd5230d155d78ebb"
 	)
 
