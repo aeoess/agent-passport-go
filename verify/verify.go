@@ -101,7 +101,10 @@ type ChainInput struct {
 // "" if the chain is valid. Check order matches the reference validator:
 // depth, then per link root->leaf: validity, signature, scope narrowing.
 func ValidateChain(in ChainInput) string {
-	if in.Chain == nil {
+	// A present-but-empty chain (len 0) is not a valid delegation and must be
+	// refused identically to a nil chain: fail-closed. Guarding only nil left an
+	// asymmetric fail-open where an explicit empty array returned "" (valid).
+	if len(in.Chain) == 0 {
 		return CodeInvalidSig
 	}
 	if in.MaxDepth != nil && len(in.Chain) > *in.MaxDepth {

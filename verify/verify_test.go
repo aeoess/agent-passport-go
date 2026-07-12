@@ -136,6 +136,20 @@ func TestValidChainAccepts(t *testing.T) {
 	}
 }
 
+// TestEmptyChainRefused guards APG-01: a present-but-empty chain array (len 0)
+// must be refused identically to a nil chain (CodeInvalidSig), not accepted as
+// valid. An explicit empty chain is not a valid delegation and must fail-closed.
+func TestEmptyChainRefused(t *testing.T) {
+	got := ValidateChain(ChainInput{Chain: []map[string]interface{}{}})
+	if got != CodeInvalidSig {
+		t.Errorf("ValidateChain(empty chain) = %q, want %q", got, CodeInvalidSig)
+	}
+	// nil chain must remain refused too (symmetry).
+	if got := ValidateChain(ChainInput{Chain: nil}); got != CodeInvalidSig {
+		t.Errorf("ValidateChain(nil chain) = %q, want %q", got, CodeInvalidSig)
+	}
+}
+
 func TestScopeCovers(t *testing.T) {
 	cases := []struct {
 		granted, required string
