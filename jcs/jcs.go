@@ -58,6 +58,27 @@ func CanonicalHash(v interface{}) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// ErrLoneSurrogate is returned when a string contains an unpaired UTF-16
+// surrogate. A lone surrogate is not a valid Unicode scalar and has no UTF-8
+// encoding, so RFC 8785 requires rejecting the input rather than replacing it
+// with U+FFFD. Check with errors.Is(err, jcs.ErrLoneSurrogate).
+var ErrLoneSurrogate = errors.New("jcs: string contains an unpaired UTF-16 surrogate; a lone surrogate has no valid UTF-8 encoding and RFC 8785 requires rejection")
+
+// hasLoneSurrogate reports whether s contains the (invalid) UTF-8 byte sequence
+// for a surrogate code point U+D800..U+DFFF: a 0xED lead byte followed by a
+// 0xA0..0xBF byte. Valid characters U+D000..U+D7FF use 0xED with a 0x80..0x9F
+// second byte, and valid non-BMP scalars use 0xF0..0xF4 lead bytes, so neither
+// is flagged. Range over a Go string would silently decode such bytes to U+FFFD,
+// so this scans the raw bytes instead.
+func hasLoneSurrogate(s string) bool {
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] == 0xED && s[i+1] >= 0xA0 && s[i+1] <= 0xBF {
+			return true
+		}
+	}
+	return false
+}
+
 func write(sb *strings.Builder, v interface{}) error {
 	switch x := v.(type) {
 	case nil:
@@ -69,6 +90,9 @@ func write(sb *strings.Builder, v interface{}) error {
 			sb.WriteString("false")
 		}
 	case string:
+		if hasLoneSurrogate(x) {
+			return ErrLoneSurrogate
+		}
 		writeString(sb, x)
 	case json.Number:
 		f, err := x.Float64()
@@ -105,6 +129,9 @@ func write(sb *strings.Builder, v interface{}) error {
 		for i, k := range keys {
 			if i > 0 {
 				sb.WriteByte(',')
+			}
+			if hasLoneSurrogate(k) {
+				return ErrLoneSurrogate
 			}
 			writeString(sb, k)
 			sb.WriteByte(':')
