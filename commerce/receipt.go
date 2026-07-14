@@ -149,6 +149,12 @@ func VerifyCommerceReceipt(receipt CommerceActionReceipt, publicKey string) (boo
 // json.Number so jcs.Canonicalize applies the ECMAScript number formatting that
 // matches the reference SDK.
 func structToMap(v interface{}) (map[string]interface{}, error) {
+	// Validate every string in the TYPED value before json.Marshal: a WTF-8 lone
+	// surrogate would otherwise be silently rewritten to U+FFFD and signed, while
+	// TypeScript and Python reject it. This is the marshal-phase guard.
+	if err := jcs.ValidateGoValue(v); err != nil {
+		return nil, err
+	}
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
