@@ -24,6 +24,7 @@
 package jcs
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -33,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // Canonicalize returns the RFC 8785 JCS string for v. v should be the result of
@@ -58,6 +60,195 @@ func CanonicalHash(v interface{}) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// hex4 decodes a 4-byte lowercase/uppercase hex slice, or -1 if not hex.
+func hex4(b []byte) int {
+	v := 0
+	for _, c := range b {
+		v <<= 4
+		switch {
+		case c >= '0' && c <= '9':
+			v |= int(c - '0')
+		case c >= 'a' && c <= 'f':
+			v |= int(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			v |= int(c-'A') + 10
+		default:
+			return -1
+		}
+	}
+	return v
+}
+
+// hasLoneSurrogateEscape scans raw JSON text for an unpaired \uXXXX surrogate
+// escape inside a string: a high surrogate (\uD800..\uDBFF) not immediately
+// followed by a low-surrogate escape, or a low surrogate (\uDC00..\uDFFF) with
+// no preceding high. It is string-aware and escape-aware, so an escaped
+// backslash (\\uD800, a literal "\uD800" text) is NOT flagged and a valid
+// escaped pair (😀) passes. This must run on the UNPARSED text because
+// Go's encoding/json replaces a lone surrogate with U+FFFD during Unmarshal,
+// after which {"a":"\uD800"} and a genuine {"a":"�"} are byte-identical.
+func hasLoneSurrogateEscape(b []byte) bool {
+	n := len(b)
+	i := 0
+	inStr := false
+	for i < n {
+		c := b[i]
+		if !inStr {
+			if c == '"' {
+				inStr = true
+			}
+			i++
+			continue
+		}
+		if c == '\\' {
+			if i+1 >= n {
+				return false // malformed; the JSON decoder reports it
+			}
+			if b[i+1] == 'u' {
+				if i+6 > n {
+					i += 2
+					continue
+				}
+				code := hex4(b[i+2 : i+6])
+				if code >= 0xD800 && code <= 0xDBFF { // high surrogate
+					if i+12 <= n && b[i+6] == '\\' && b[i+7] == 'u' {
+						if lo := hex4(b[i+8 : i+12]); lo >= 0xDC00 && lo <= 0xDFFF {
+							i += 12 // valid pair
+							continue
+						}
+					}
+					return true
+				}
+				if code >= 0xDC00 && code <= 0xDFFF { // lone low surrogate
+					return true
+				}
+				i += 6
+				continue
+			}
+			i += 2 // other escape (\" \\ \/ \n ...); skip the escaped char
+			continue
+		}
+		if c == '"' {
+			inStr = false
+		}
+		i++
+	}
+	return false
+}
+
+// ValidateJSONText is a UNICODE validator, not a JSON-grammar validator. It
+// rejects raw JSON text that cannot canonicalize to Unicode scalar values: any
+// invalid UTF-8 in the bytes, or an unpaired \uXXXX surrogate escape inside a
+// string. It does NOT check JSON syntax (a malformed document passes here and is
+// rejected later by the decoder); CanonicalizeJSON adds that rejection via
+// json.Decode. Call ValidateJSONText BEFORE decoding, because encoding/json
+// substitutes U+FFFD for a lone surrogate and the substitution is undetectable
+// afterward.
+//
+// It runs two linear single passes over the already-materialized bytes
+// (utf8.Valid, then the surrogate-escape scan) with no allocation, so it adds
+// O(n) and no memory or CPU amplification; callers pass a bounded in-memory
+// []byte, so it runs after whatever size limit produced that buffer.
+//
+// Returns a *CanonicalizationError (errors.Is against ErrLoneSurrogate /
+// ErrInvalidUTF8), or nil when the text is acceptable. A genuine U+FFFD
+// replacement character in the input is a valid scalar and is accepted.
+func ValidateJSONText(raw []byte) error {
+	if !utf8.Valid(raw) {
+		return errInvalidUTF8()
+	}
+	if hasLoneSurrogateEscape(raw) {
+		return errLoneSurrogate()
+	}
+	return nil
+}
+
+// CanonicalizeJSON validates raw JSON text (ValidateJSONText), decodes it with
+// json.Number fidelity, and canonicalizes. This is the safe entry point for raw
+// JSON that may carry a lone surrogate; prefer it over a bare json.Unmarshal
+// followed by Canonicalize, which would lose a lone surrogate to U+FFFD before
+// the canonicalizer runs.
+func CanonicalizeJSON(raw []byte) (string, error) {
+	if err := ValidateJSONText(raw); err != nil {
+		return "", err
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v interface{}
+	if err := dec.Decode(&v); err != nil {
+		return "", err
+	}
+	return Canonicalize(v)
+}
+
+// ErrLoneSurrogate is a sentinel: a string (or a raw \uXXXX escape) contains an
+// unpaired UTF-16 surrogate. A lone surrogate is not a valid Unicode scalar and
+// has no UTF-8 encoding, so RFC 8785 requires rejecting the input rather than
+// replacing it with U+FFFD. Match with errors.Is(err, jcs.ErrLoneSurrogate).
+var ErrLoneSurrogate = errors.New("jcs: string contains an unpaired UTF-16 surrogate; a lone surrogate has no valid UTF-8 encoding and RFC 8785 requires rejection")
+
+// ErrInvalidUTF8 is a sentinel: a string is not valid UTF-8 (non-scalar bytes
+// other than the surrogate pattern). RFC 8785 / I-JSON require Unicode scalar
+// values. Match with errors.Is(err, jcs.ErrInvalidUTF8).
+var ErrInvalidUTF8 = errors.New("jcs: string is not valid UTF-8; RFC 8785 requires a sequence of Unicode scalar values")
+
+// CanonicalizationError is the typed error returned when canonicalization must
+// terminate on invalid input. Category is stable and machine-readable across the
+// APS SDKs (TypeScript, Python, Go); Reason names the specific failure. It
+// unwraps to a sentinel (ErrLoneSurrogate or ErrInvalidUTF8) so both
+// errors.Is(err, jcs.ErrLoneSurrogate) and errors.As(err, &jcs.CanonicalizationError{})
+// work, and any existing `if err != nil` fail-closed path already handles it.
+// The offending string is never included in the message (signed payloads may be
+// sensitive).
+type CanonicalizationError struct {
+	Category string // stable cross-language category, e.g. "invalid_unicode"
+	Reason   string // "lone_surrogate" | "invalid_utf8"
+	sentinel error
+}
+
+func (e *CanonicalizationError) Error() string {
+	return "jcs: " + e.Category + " (" + e.Reason + "); RFC 8785 requires rejection"
+}
+
+// Unwrap exposes the sentinel so errors.Is matches ErrLoneSurrogate / ErrInvalidUTF8.
+func (e *CanonicalizationError) Unwrap() error { return e.sentinel }
+
+func errLoneSurrogate() error {
+	return &CanonicalizationError{Category: "invalid_unicode", Reason: "lone_surrogate", sentinel: ErrLoneSurrogate}
+}
+func errInvalidUTF8() error {
+	return &CanonicalizationError{Category: "invalid_unicode", Reason: "invalid_utf8", sentinel: ErrInvalidUTF8}
+}
+
+// hasLoneSurrogate reports whether s contains the (invalid) UTF-8 byte sequence
+// for a surrogate code point U+D800..U+DFFF: a 0xED lead byte followed by a
+// 0xA0..0xBF byte. Valid characters U+D000..U+D7FF use 0xED with a 0x80..0x9F
+// second byte, and valid non-BMP scalars use 0xF0..0xF4 lead bytes, so neither
+// is flagged. Range over a Go string would silently decode such bytes to U+FFFD,
+// so this scans the raw bytes instead.
+func hasLoneSurrogate(s string) bool {
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] == 0xED && s[i+1] >= 0xA0 && s[i+1] <= 0xBF {
+			return true
+		}
+	}
+	return false
+}
+
+// validateScalarString rejects any string that is not a sequence of Unicode
+// scalar values: first the specific WTF-8 lone-surrogate byte pattern, then any
+// other invalid UTF-8. This is the programmatic-string layer (Go strings built
+// in memory, not decoded from JSON text).
+func validateScalarString(s string) error {
+	if hasLoneSurrogate(s) {
+		return errLoneSurrogate()
+	}
+	if !utf8.ValidString(s) {
+		return errInvalidUTF8()
+	}
+	return nil
+}
+
 func write(sb *strings.Builder, v interface{}) error {
 	switch x := v.(type) {
 	case nil:
@@ -69,6 +260,9 @@ func write(sb *strings.Builder, v interface{}) error {
 			sb.WriteString("false")
 		}
 	case string:
+		if err := validateScalarString(x); err != nil {
+			return err
+		}
 		writeString(sb, x)
 	case json.Number:
 		f, err := x.Float64()
@@ -105,6 +299,9 @@ func write(sb *strings.Builder, v interface{}) error {
 		for i, k := range keys {
 			if i > 0 {
 				sb.WriteByte(',')
+			}
+			if err := validateScalarString(k); err != nil {
+				return err
 			}
 			writeString(sb, k)
 			sb.WriteByte(':')

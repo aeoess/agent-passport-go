@@ -61,7 +61,11 @@ func signTraceDelegation(t *testing.T, delegatorSeed, id, from, to string, scope
 // the given seed, the exact preimage TS verifyReceipt checks.
 func signReceipt(t *testing.T, receipt ActionReceipt, seed string) string {
 	t.Helper()
-	g, ok := toGeneric(receipt).(map[string]interface{})
+	gv, err := toGeneric(receipt)
+	if err != nil {
+		t.Fatalf("toGeneric receipt: %v", err)
+	}
+	g, ok := gv.(map[string]interface{})
 	if !ok {
 		t.Fatal("receipt did not project to a map")
 	}

@@ -240,7 +240,11 @@ func sha256Hex(data string) string {
 // projected to generic JSON first because jcs.Canonicalize operates on the
 // generic shape (map/slice/scalar), the same as the reference object.
 func HashReceipt(receipt ActionReceipt) (string, error) {
-	canon, err := jcs.Canonicalize(toGeneric(receipt))
+	g, err := toGeneric(receipt)
+	if err != nil {
+		return "", err
+	}
+	canon, err := jcs.Canonicalize(g)
 	if err != nil {
 		return "", err
 	}
@@ -410,7 +414,11 @@ func verifyReceiptSignature(receipt ActionReceipt, agentPublicKey string) bool {
 	if receipt.Version != "1.1" {
 		return false
 	}
-	g, ok := toGeneric(receipt).(map[string]interface{})
+	gv, err := toGeneric(receipt)
+	if err != nil {
+		return false
+	}
+	g, ok := gv.(map[string]interface{})
 	if !ok {
 		return false
 	}
@@ -443,8 +451,12 @@ func VerifyAttributionReport(report AttributionReport, publicKey string) (bool, 
 	}
 
 	if report.EntriesHash != "" {
-		canon, err := jcs.Canonicalize(toGeneric(report.Entries))
-		if err == nil {
+		gv, gerr := toGeneric(report.Entries)
+		var canon string
+		if gerr == nil {
+			canon, gerr = jcs.Canonicalize(gv)
+		}
+		if gerr == nil {
 			expectedHash := sha256Hex(canon)
 			if report.EntriesHash != expectedHash {
 				errs = append(errs, "Entries hash mismatch - weights may have been tampered")
@@ -598,7 +610,11 @@ func VerifyMerkleProofAgainstRoot(proof MerkleProof, trustedRoot string) bool {
 // map so the stripped-signature preimage matches the reference object-rest
 // destructuring exactly.
 func verifyReportSignature(report AttributionReport, publicKey string) bool {
-	canon, err := jcs.Canonicalize(unsignedReport(report))
+	u, err := unsignedReport(report)
+	if err != nil {
+		return false
+	}
+	canon, err := jcs.Canonicalize(u)
 	if err != nil {
 		return false
 	}
@@ -609,14 +625,22 @@ func verifyReportSignature(report AttributionReport, publicKey string) bool {
 // signature covers: canonicalize(report minus its signature field). Callers can
 // hash or sign these bytes; the verify side recomputes the same preimage.
 func ReportSignedBytes(report AttributionReport) (string, error) {
-	return jcs.Canonicalize(unsignedReport(report))
+	u, err := unsignedReport(report)
+	if err != nil {
+		return "", err
+	}
+	return jcs.Canonicalize(u)
 }
 
 // canonicalizeGeneric projects v to its generic JSON form and canonicalizes it
 // with the Phase-0 jcs core. It is the one canonicalization entry point this
 // package uses for typed values.
 func canonicalizeGeneric(v interface{}) (string, error) {
-	return jcs.Canonicalize(toGeneric(v))
+	g, err := toGeneric(v)
+	if err != nil {
+		return "", err
+	}
+	return jcs.Canonicalize(g)
 }
 
 // SignReport signs an AttributionReport with the caller-supplied private key
@@ -625,7 +649,10 @@ func canonicalizeGeneric(v interface{}) (string, error) {
 // create half that pairs with VerifyAttributionReport. Key material is never
 // logged; on error the returned error carries no key bytes.
 func SignReport(report AttributionReport, privateKeyHex string) (AttributionReport, error) {
-	g := unsignedReport(report)
+	g, err := unsignedReport(report)
+	if err != nil {
+		return AttributionReport{}, err
+	}
 	sig, err := keys.SignCanonical(g, privateKeyHex)
 	if err != nil {
 		return AttributionReport{}, err

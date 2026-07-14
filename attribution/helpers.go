@@ -8,6 +8,7 @@ import (
 	"math"
 	"strconv"
 
+	"github.com/aeoess/agent-passport-go/jcs"
 	"github.com/aeoess/agent-passport-go/verify"
 )
 
@@ -23,18 +24,25 @@ func verifyEd25519Hex(message []byte, sigHex, pubHex string) bool {
 // reference SDK canonicalizes (it works on plain JS objects). Numbers decode as
 // json.Number, which the jcs ECMAScript number serializer formats identically
 // to JSON.stringify (integers without a trailing ".0", -0 as "0").
-func toGeneric(v interface{}) interface{} {
+func toGeneric(v interface{}) (interface{}, error) {
+	// Validate every string in the TYPED value before json.Marshal: a WTF-8 lone
+	// surrogate would otherwise be silently rewritten to U+FFFD and signed, while
+	// TypeScript and Python reject it. Returning an error (never a silent nil)
+	// keeps the rejection from collapsing to a signed "null".
+	if err := jcs.ValidateGoValue(v); err != nil {
+		return nil, err
+	}
 	b, err := json.Marshal(v)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
 	var out interface{}
 	if err := dec.Decode(&out); err != nil {
-		return nil
+		return nil, err
 	}
-	return out
+	return out, nil
 }
 
 // unsignedReport returns the report as a generic map with the signature key
@@ -42,13 +50,17 @@ func toGeneric(v interface{}) interface{} {
 // destructuring { signature, ...unsigned }. The JSON round-trip yields exactly
 // the field set the reference object carries (omitempty fields that are empty
 // are absent on both sides, which the null-stripping canonicalize also drops).
-func unsignedReport(report AttributionReport) map[string]interface{} {
-	g, ok := toGeneric(report).(map[string]interface{})
-	if !ok {
-		return map[string]interface{}{}
+func unsignedReport(report AttributionReport) (map[string]interface{}, error) {
+	g, err := toGeneric(report)
+	if err != nil {
+		return nil, err
 	}
-	delete(g, "signature")
-	return g
+	m, ok := g.(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{}, nil
+	}
+	delete(m, "signature")
+	return m, nil
 }
 
 // roundTo3 mirrors the reference Math.round(x * 1000) / 1000.
