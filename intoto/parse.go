@@ -23,6 +23,13 @@ func ParseDecisionReceiptStatement(env DecisionReceiptEnvelope) (map[string]inte
 	if env.Payload == "" {
 		return nil, errEmptyPayload
 	}
+	// Reject a lone-surrogate escape (or invalid UTF-8) in the raw payload text
+	// before decoding: encoding/json would substitute U+FFFD and the verifier
+	// would then canonicalize and hash an altered value. RFC 8785 requires
+	// rejection. This fails closed (VerifyEnvelope returns false).
+	if err := jcs.ValidateJSONText([]byte(env.Payload)); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader([]byte(env.Payload)))
 	dec.UseNumber()
 	var stmt map[string]interface{}
