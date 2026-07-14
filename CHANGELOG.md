@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.0
+
+Cross-language parity reference: TypeScript SDK v4.1.0, Python SDK v2.9.0. The matching git tag v0.4.0 is created and pushed as a separate step.
+
+### Fixed / Security
+- **JCS canonicalization now rejects lone surrogates (RFC 8785).** The raw-JSON decode path let `encoding/json` substitute U+FFFD for an unpaired surrogate before the scanner ran, so input that is not valid Unicode was silently repaired and signed rather than rejected. All raw-JSON decode sites now detect the unpaired surrogate on the original bytes and reject it before hashing. Typed-value strings on the commerce and attribution signing paths are validated before `json.Marshal`, closing a marshal-before-validate gap (WYSIWYS).
+
+### Behavior change
+- Input that was previously accepted is now rejected. A value carrying a lone surrogate on a canonicalization or signing path returns an error instead of producing a signature. Callers that never emit unpaired surrogates see no change.
+
 ## v0.2.0-alpha.3
 
 This entry is prepared locally. The matching git tag is not created here; tagging and publishing are a
