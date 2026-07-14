@@ -136,13 +136,23 @@ func hasLoneSurrogateEscape(b []byte) bool {
 	return false
 }
 
-// ValidateJSONText rejects raw JSON text that cannot canonicalize to Unicode
-// scalar values: any invalid UTF-8 in the bytes, or an unpaired \uXXXX surrogate
-// escape. Call it BEFORE decoding, because encoding/json substitutes U+FFFD for
-// a lone surrogate and the substitution is undetectable afterward. Returns a
-// *CanonicalizationError (errors.Is against ErrLoneSurrogate / ErrInvalidUTF8),
-// or nil when the text is acceptable. A genuine U+FFFD replacement character in
-// the input is a valid scalar and is accepted.
+// ValidateJSONText is a UNICODE validator, not a JSON-grammar validator. It
+// rejects raw JSON text that cannot canonicalize to Unicode scalar values: any
+// invalid UTF-8 in the bytes, or an unpaired \uXXXX surrogate escape inside a
+// string. It does NOT check JSON syntax (a malformed document passes here and is
+// rejected later by the decoder); CanonicalizeJSON adds that rejection via
+// json.Decode. Call ValidateJSONText BEFORE decoding, because encoding/json
+// substitutes U+FFFD for a lone surrogate and the substitution is undetectable
+// afterward.
+//
+// It runs two linear single passes over the already-materialized bytes
+// (utf8.Valid, then the surrogate-escape scan) with no allocation, so it adds
+// O(n) and no memory or CPU amplification; callers pass a bounded in-memory
+// []byte, so it runs after whatever size limit produced that buffer.
+//
+// Returns a *CanonicalizationError (errors.Is against ErrLoneSurrogate /
+// ErrInvalidUTF8), or nil when the text is acceptable. A genuine U+FFFD
+// replacement character in the input is a valid scalar and is accepted.
 func ValidateJSONText(raw []byte) error {
 	if !utf8.Valid(raw) {
 		return errInvalidUTF8()

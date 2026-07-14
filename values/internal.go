@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aeoess/agent-passport-go/jcs"
 	"github.com/aeoess/agent-passport-go/verify"
 )
 
@@ -90,6 +91,16 @@ func checkToMap(c ComplianceCheck) map[string]interface{} {
 // parseFloorJSON decodes the canonical JSON floor. It requires a top-level
 // "floor" array, matching the reference loadFloor JSON branch.
 func parseFloorJSON(input string) (ValuesFloor, error) {
+	// Reject a lone-surrogate escape (or invalid UTF-8) in the raw floor text
+	// before decoding: encoding/json would substitute U+FFFD, and the floor's
+	// principle strings reach the signed compliance report (reportToMap ->
+	// principleName/detail) via jcs.Canonicalize. TypeScript and Python preserve
+	// the lone surrogate through parsing and reject it at that canonicalization,
+	// so without this Go would sign a substituted value while they reject the
+	// same floor. RFC 8785 requires rejection.
+	if err := jcs.ValidateJSONText([]byte(input)); err != nil {
+		return ValuesFloor{}, err
+	}
 	var probe struct {
 		Floor json.RawMessage `json:"floor"`
 	}
