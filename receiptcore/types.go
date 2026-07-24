@@ -52,6 +52,7 @@ type CoreDecisionOutputV1 struct {
 	Verdict               string   `json:"verdict"`
 	EffectiveAuthorityRef *string  `json:"effective_authority_ref"`
 	Constraints           []string `json:"constraints"`
+	ValidUntil            *string  `json:"valid_until"`
 }
 
 type SupportingRecordV1 struct {

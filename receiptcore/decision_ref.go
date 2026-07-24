@@ -92,6 +92,12 @@ func NormalizeCoreDecisionOutputV1(input CoreDecisionOutputV1) (CoreDecisionOutp
 	if input.Verdict != "deny" && (input.EffectiveAuthorityRef == nil || !hex64.MatchString(*input.EffectiveAuthorityRef)) {
 		return CoreDecisionOutputV1{}, errors.New("receiptcore: permit/narrow require effective_authority_ref")
 	}
+	if input.Verdict == "deny" && input.ValidUntil != nil {
+		return CoreDecisionOutputV1{}, errors.New("receiptcore: deny requires null valid_until")
+	}
+	if input.Verdict != "deny" && (input.ValidUntil == nil || !isExactUTCMilliseconds(*input.ValidUntil)) {
+		return CoreDecisionOutputV1{}, errors.New("receiptcore: permit/narrow require valid_until as exact UTC milliseconds")
+	}
 	set := map[string]struct{}{}
 	for _, constraint := range input.Constraints {
 		if _, err := strictJCS(constraint); err != nil {
@@ -106,4 +112,27 @@ func NormalizeCoreDecisionOutputV1(input CoreDecisionOutputV1) (CoreDecisionOutp
 	sort.Strings(constraints) // UTF-8 order equals Unicode code-point order for scalar strings.
 	input.Constraints = constraints
 	return input, nil
+}
+
+// CoreDecisionOutputMapV1 renders a normalized decision output as the I-JSON
+// value that is canonicalized and hashed. strictJCS rejects Go structs, so a
+// caller computing the "output" component ref must hash this map rather than
+// the struct; the two would otherwise drift silently as members are added.
+func CoreDecisionOutputMapV1(input CoreDecisionOutputV1) map[string]interface{} {
+	constraints := make([]interface{}, len(input.Constraints))
+	for i, constraint := range input.Constraints {
+		constraints[i] = constraint
+	}
+	value := map[string]interface{}{
+		"profile": input.Profile, "verdict": input.Verdict,
+		"effective_authority_ref": nil, "constraints": constraints,
+		"valid_until": nil,
+	}
+	if input.EffectiveAuthorityRef != nil {
+		value["effective_authority_ref"] = *input.EffectiveAuthorityRef
+	}
+	if input.ValidUntil != nil {
+		value["valid_until"] = *input.ValidUntil
+	}
+	return value
 }

@@ -40,7 +40,8 @@ func TestDecisionRefAndConstraintNormalization(t *testing.T) {
 		t.Fatalf("decision ref order changed: %v", err)
 	}
 	effective := hx("b")
-	out, err := NormalizeCoreDecisionOutputV1(CoreDecisionOutputV1{Profile: "aps-core-decision-output-v1", Verdict: "narrow", EffectiveAuthorityRef: &effective, Constraints: []string{"é", "read", "e\u0301", "read"}})
+	validUntil := "2026-04-08T12:00:05.000Z"
+	out, err := NormalizeCoreDecisionOutputV1(CoreDecisionOutputV1{Profile: "aps-core-decision-output-v1", Verdict: "narrow", EffectiveAuthorityRef: &effective, Constraints: []string{"é", "read", "e\u0301", "read"}, ValidUntil: &validUntil})
 	if err != nil || len(out.Constraints) != 2 || out.Constraints[0] != "read" || out.Constraints[1] != "é" {
 		t.Fatalf("bad constraints: %#v %v", out, err)
 	}
@@ -147,5 +148,55 @@ func TestStrictNewWriteAndExplicitDispatch(t *testing.T) {
 	}
 	if ClassifySupportingRecordFormat(map[string]interface{}{"profile": "future"}).Format != "unknown" {
 		t.Fatal("unknown guessed")
+	}
+}
+
+func TestCoreDecisionOutputBindsValidUntilIntoHashedPreimage(t *testing.T) {
+	effective := hx("b")
+	first := "2026-04-08T12:00:05.000Z"
+	second := "2026-04-08T12:00:06.000Z"
+	permit := CoreDecisionOutputV1{Profile: "aps-core-decision-output-v1", Verdict: "permit", EffectiveAuthorityRef: &effective, Constraints: []string{"commerce:read"}, ValidUntil: &first}
+
+	normalized, err := NormalizeCoreDecisionOutputV1(permit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refA, err := ComputeDecisionComponentRefV1("output", CoreDecisionOutputMapV1(normalized))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shifted := permit
+	shifted.ValidUntil = &second
+	normalizedShifted, err := NormalizeCoreDecisionOutputV1(shifted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refB, err := ComputeDecisionComponentRefV1("output", CoreDecisionOutputMapV1(normalizedShifted))
+	if err != nil || refA == refB {
+		t.Fatalf("valid_until not bound into the digest: %s %s %v", refA, refB, err)
+	}
+
+	denied, err := NormalizeCoreDecisionOutputV1(CoreDecisionOutputV1{Profile: "aps-core-decision-output-v1", Verdict: "deny", Constraints: []string{}})
+	if err != nil || denied.ValidUntil != nil {
+		t.Fatalf("deny with null valid_until must normalize: %v", err)
+	}
+	if _, err := ComputeDecisionComponentRefV1("output", CoreDecisionOutputMapV1(denied)); err != nil {
+		t.Fatal(err)
+	}
+
+	noValidUntil := permit
+	noValidUntil.ValidUntil = nil
+	if _, err := NormalizeCoreDecisionOutputV1(noValidUntil); err == nil {
+		t.Fatal("permit without valid_until must be rejected")
+	}
+	denyWithTimestamp := CoreDecisionOutputV1{Profile: "aps-core-decision-output-v1", Verdict: "deny", Constraints: []string{}, ValidUntil: &first}
+	if _, err := NormalizeCoreDecisionOutputV1(denyWithTimestamp); err == nil {
+		t.Fatal("deny with a valid_until timestamp must be rejected")
+	}
+	malformed := "2026-04-08T12:00:05Z"
+	badShape := permit
+	badShape.ValidUntil = &malformed
+	if _, err := NormalizeCoreDecisionOutputV1(badShape); err == nil {
+		t.Fatal("permit with a malformed valid_until must be rejected")
 	}
 }
