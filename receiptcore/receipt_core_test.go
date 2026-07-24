@@ -10,7 +10,9 @@ import (
 
 const privateKey = "0000000000000000000000000000000000000000000000000000000000000000"
 
-const katDecisionRef = "2157809a9a722314ae19dce7a242ea3b54a8948230fab2fab5d5dc15bd663dc2"
+// Repinned: BuildDecisionRefV1 now normalizes before hashing, so the decision output must be a
+// valid five-member CoreDecisionOutputV1. Was 2157809a9a722314ae19dce7a242ea3b54a8948230fab2fab5d5dc15bd663dc2.
+const katDecisionRef = "e474f27bc7e228cd515d4192936cd5525ac8f362fa95173c82eaff02059389e7"
 const katReceiptID = "89b0b77807e99845aab403f01bcdaa2f02949f6c9db84e1aca6c0a8449e4d023"
 const katReceiptSig = "83deb713568bbdf0c85e1a6d46345530e84dbe86cdefe1cb608b0f14372c176a9e69e0033db11c4c44ff84be3de3bee5e212707eb84206f6c34455206d37f90b"
 const katMerkleRoot = "03700eeba1b453086063612d3df73f711827735c3fe30cf8a8a2a6379a6f6d5f"
@@ -28,14 +30,17 @@ func hx(char string) string {
 }
 
 func TestDecisionRefAndConstraintNormalization(t *testing.T) {
-	_, first, err := BuildDecisionRefV1(hx("a"), map[string]interface{}{"scope": []interface{}{"read"}, "revoked": false}, map[string]interface{}{"id": "p1", "version": "1"}, map[string]interface{}{"tenant": "t1"}, map[string]interface{}{"verdict": "permit", "constraints": []interface{}{}})
+	katEffective := hx("b")
+	katValidUntil := "2026-04-08T12:00:05.000Z"
+	katOutput := CoreDecisionOutputV1{Profile: "aps-core-decision-output-v1", Verdict: "permit", EffectiveAuthorityRef: &katEffective, Constraints: []string{}, ValidUntil: &katValidUntil}
+	_, first, err := BuildDecisionRefV1(hx("a"), map[string]interface{}{"scope": []interface{}{"read"}, "revoked": false}, map[string]interface{}{"id": "p1", "version": "1"}, map[string]interface{}{"tenant": "t1"}, katOutput)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first != katDecisionRef {
 		t.Fatalf("decision_ref KAT mismatch: %s", first)
 	}
-	_, reordered, err := BuildDecisionRefV1(hx("a"), map[string]interface{}{"revoked": false, "scope": []interface{}{"read"}}, map[string]interface{}{"version": "1", "id": "p1"}, map[string]interface{}{"tenant": "t1"}, map[string]interface{}{"constraints": []interface{}{}, "verdict": "permit"})
+	_, reordered, err := BuildDecisionRefV1(hx("a"), map[string]interface{}{"revoked": false, "scope": []interface{}{"read"}}, map[string]interface{}{"version": "1", "id": "p1"}, map[string]interface{}{"tenant": "t1"}, katOutput)
 	if err != nil || first != reordered {
 		t.Fatalf("decision ref order changed: %v", err)
 	}
@@ -198,5 +203,87 @@ func TestCoreDecisionOutputBindsValidUntilIntoHashedPreimage(t *testing.T) {
 	badShape.ValidUntil = &malformed
 	if _, err := NormalizeCoreDecisionOutputV1(badShape); err == nil {
 		t.Fatal("permit with a malformed valid_until must be rejected")
+	}
+}
+
+func builderPlaceholders() (string, interface{}, interface{}, interface{}) {
+	return hx("a"),
+		map[string]interface{}{"scope": []interface{}{"read"}, "revoked": false},
+		map[string]interface{}{"id": "p1", "version": "1"},
+		map[string]interface{}{"tenant": "t1"}
+}
+
+func case1Output() CoreDecisionOutputV1 {
+	effective := "3f2a1c9d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a39281706f5e4d3c2b1a0987654"
+	validUntil := "2026-04-08T12:00:05.000Z"
+	return CoreDecisionOutputV1{Profile: "aps-core-decision-output-v1", Verdict: "permit", EffectiveAuthorityRef: &effective, Constraints: []string{"commerce:read"}, ValidUntil: &validUntil}
+}
+
+func TestBuildDecisionRefV1EndToEndBindsNormalizedFiveMemberOutput(t *testing.T) {
+	action, authority, policy, context := builderPlaceholders()
+	input, ref, err := BuildDecisionRefV1(action, authority, policy, context, case1Output())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.DecisionOutputRef != "4226e417c01f4d395db503bfcc00a2e022f5f864568b5fb2b88eefe4fbd0c551" {
+		t.Fatalf("decision_output_ref: %s", input.DecisionOutputRef)
+	}
+	if ref != "8a9595fd9d7caf15654fca34816e22d02562f9db16dcc7d5958b906541dce8de" {
+		t.Fatalf("decision_ref: %s", ref)
+	}
+}
+
+func TestBuildDecisionRefV1RejectsEveryMalformedDecisionOutput(t *testing.T) {
+	action, authority, policy, context := builderPlaceholders()
+	bad := func(name string, out CoreDecisionOutputV1) {
+		if _, _, err := BuildDecisionRefV1(action, authority, policy, context, out); err == nil {
+			t.Fatalf("%s must be rejected by the builder", name)
+		}
+	}
+	missing := case1Output()
+	missing.ValidUntil = nil
+	bad("missing valid_until", missing)
+	malformed := case1Output()
+	badStamp := "2026-04-08T12:00:05Z"
+	malformed.ValidUntil = &badStamp
+	bad("malformed valid_until", malformed)
+	denyStamp := "2026-04-08T12:00:05.000Z"
+	bad("deny with non-null valid_until", CoreDecisionOutputV1{Profile: "aps-core-decision-output-v1", Verdict: "deny", Constraints: []string{}, ValidUntil: &denyStamp})
+	permitNull := case1Output()
+	permitNull.ValidUntil = nil
+	bad("permit with null valid_until", permitNull)
+	// The fifth JOB5 rejection case, an unknown extra member, is not representable against the
+	// typed CoreDecisionOutputV1 parameter: the closed struct makes the opaque bypass a compile
+	// error, which is a stronger guarantee than a runtime rejection.
+}
+
+func TestDecisionRefChangesWhenOnlyValidUntilChanges(t *testing.T) {
+	action, authority, policy, context := builderPlaceholders()
+	_, a, err := BuildDecisionRefV1(action, authority, policy, context, case1Output())
+	if err != nil {
+		t.Fatal(err)
+	}
+	shifted := case1Output()
+	later := "2026-04-08T12:00:06.000Z"
+	shifted.ValidUntil = &later
+	_, b, err := BuildDecisionRefV1(action, authority, policy, context, shifted)
+	if err != nil || a == b {
+		t.Fatalf("valid_until must change decision_ref: %s %s %v", a, b, err)
+	}
+	if b != "7c45ce5ecfa8f8aa1bd249513c73c81b31eb193b236dfe50530d58b598c388eb" {
+		t.Fatalf("shifted decision_ref: %s", b)
+	}
+}
+
+// Hash primitive test, not a conformance path test. ComputeDecisionComponentRefV1 is the
+// low-level primitive and takes an already-normalized I-JSON interface{} value.
+func TestComputeDecisionComponentRefV1HashesArbitraryIJSONValue(t *testing.T) {
+	digest, err := ComputeDecisionComponentRefV1("context", map[string]interface{}{"tenant": "t1", "nested": []interface{}{1.0, 2.0, 3.0}})
+	if err != nil || !hex64.MatchString(digest) {
+		t.Fatalf("primitive digest: %s %v", digest, err)
+	}
+	reordered, err := ComputeDecisionComponentRefV1("context", map[string]interface{}{"nested": []interface{}{1.0, 2.0, 3.0}, "tenant": "t1"})
+	if err != nil || digest != reordered {
+		t.Fatalf("primitive must be key-order independent: %s %s %v", digest, reordered, err)
 	}
 }
