@@ -21,6 +21,7 @@ var decisionComponentTags = map[string]string{
 
 var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// Internal hash primitive: input must already be normalized. Protocol-facing callers use BuildDecisionRefV1.
 func ComputeDecisionComponentRefV1(kind string, value interface{}) (string, error) {
 	tag, ok := decisionComponentTags[kind]
 	if !ok {
@@ -57,9 +58,16 @@ func ComputeDecisionRefV1(input DecisionRefInputV1) (string, error) {
 	return hashTagged(DecisionRefTag, decisionRefMap(input))
 }
 
-func BuildDecisionRefV1(actionRef string, authorityState, policyInput, decisionContext, decisionOutput interface{}) (DecisionRefInputV1, string, error) {
+// BuildDecisionRefV1 takes the decision output as a typed CoreDecisionOutputV1 and normalizes
+// it before hashing, so an unnormalized or malformed output cannot reach the digest. The typed
+// parameter makes the previous opaque-value bypass a compile error rather than a runtime risk.
+func BuildDecisionRefV1(actionRef string, authorityState, policyInput, decisionContext interface{}, decisionOutput CoreDecisionOutputV1) (DecisionRefInputV1, string, error) {
 	if !hex64.MatchString(actionRef) {
 		return DecisionRefInputV1{}, "", errors.New("receiptcore: action_ref must be lowercase sha256 hex")
+	}
+	normalizedOutput, err := NormalizeCoreDecisionOutputV1(decisionOutput)
+	if err != nil {
+		return DecisionRefInputV1{}, "", err
 	}
 	authority, err := ComputeDecisionComponentRefV1("authority", authorityState)
 	if err != nil {
@@ -73,7 +81,7 @@ func BuildDecisionRefV1(actionRef string, authorityState, policyInput, decisionC
 	if err != nil {
 		return DecisionRefInputV1{}, "", err
 	}
-	output, err := ComputeDecisionComponentRefV1("output", decisionOutput)
+	output, err := ComputeDecisionComponentRefV1("output", CoreDecisionOutputMapV1(normalizedOutput))
 	if err != nil {
 		return DecisionRefInputV1{}, "", err
 	}
