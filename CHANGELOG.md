@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.5.0
+
+Cross-language parity reference: TypeScript SDK v4.3.0, Python SDK v2.10.0. The matching git tag v0.5.0 is created and pushed as a separate step.
+
+### Breaking
+- **`CanonicalizeScopes` now returns `([]string, error)`.** The exported canonicalizer has to be able to reject, so the signature changed. Code compiled against v0.4.0 will not compile against this release. The alternative was an exported canonicalizer that silently accepts input the specification forbids, which is the defect this release exists to close. Callers that ignore the new error keep the previous behavior for valid input.
+
+### Added
+- **receipt-core v1 module.** The Go port lands with the same shapes and the same canonical bytes as the TypeScript SDK.
+
+### Behavior change
+- **`scope_required` now rejects duplicate elements after NFC normalization.** Section 4.1 defines `scope_required` as a duplicate-free array. The canonicalizer normalized and sorted but neither deduplicated nor rejected, so `["a","a"]` and `["a"]` produced different action references while the specification admits one form. `CanonicalizeScopes` and `ComputeActionRefScopes` now return `ErrDuplicateScopeRequired`, reason `duplicate_scope_required`, before any identity is computed. Detection runs after NFC, so two spellings that collide only under normalization also reject.
+
+### Fixed
+- **`decision_ref` construction now normalizes before hashing.** The decision reference was computed over unnormalized input on one path, so two byte-different encodings of the same decision could produce different references.
+- **`valid_until` is now bound in `CoreDecisionOutputV1`.** The field was carried but not covered by the signed material, so a validity window could be altered without invalidating the signature.
+
+### Tests
+- The sprint parity vectors path is now read from `APS_SPRINT_VECTORS` instead of a hardcoded local path. The parity test skips with a named reason when the variable is unset.
+
 ## v0.4.0
 
 Cross-language parity reference: TypeScript SDK v4.1.0, Python SDK v2.9.0. The matching git tag v0.4.0 is created and pushed as a separate step.
