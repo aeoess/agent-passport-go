@@ -2,7 +2,13 @@
 
 package actionref
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+
+	"golang.org/x/text/unicode/norm"
+)
 
 func TestNormalizeTimestamp(t *testing.T) {
 	cases := []struct{ in, want string }{
@@ -119,7 +125,10 @@ func TestActionRefScopesNFCEquivalence(t *testing.T) {
 func TestActionRefScopesCodePointOrder(t *testing.T) {
 	astral := "\U00010000:x"
 	bmpHigh := "\ue000:x"
-	got := CanonicalizeScopes([]string{astral, bmpHigh})
+	got, err := CanonicalizeScopes([]string{astral, bmpHigh})
+	if err != nil {
+		t.Fatalf("CanonicalizeScopes: %v", err)
+	}
 	if got[0] != bmpHigh || got[1] != astral {
 		t.Errorf("code-point order violated: got %q first, want %q first", got[0], bmpHigh)
 	}
@@ -128,8 +137,65 @@ func TestActionRefScopesCodePointOrder(t *testing.T) {
 // TestCanonicalizeScopesDoesNotMutateCaller pins the copied-slice requirement.
 func TestCanonicalizeScopesDoesNotMutateCaller(t *testing.T) {
 	in := []string{"b:scope", "a:scope"}
-	_ = CanonicalizeScopes(in)
+	if _, err := CanonicalizeScopes(in); err != nil {
+		t.Fatalf("CanonicalizeScopes: %v", err)
+	}
 	if in[0] != "b:scope" || in[1] != "a:scope" {
 		t.Errorf("caller slice mutated: %v", in)
+	}
+}
+
+// Section 4.1 defines scope_required as a duplicate-free array. A duplicated
+// array has no canonical form, so it is rejected rather than deduplicated: a
+// silent dedupe would map ["a","a"] and ["a"] onto one identity with no error,
+// and would change the identity previously computed for the duplicated input.
+func TestCanonicalizeScopesRejectsRawDuplicate(t *testing.T) {
+	_, err := CanonicalizeScopes([]string{"a", "a"})
+	if !errors.Is(err, ErrDuplicateScopeRequired) {
+		t.Fatalf("want ErrDuplicateScopeRequired, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "duplicate_scope_required") {
+		t.Errorf("error string must name duplicate_scope_required: %q", err.Error())
+	}
+	// rejection, not dedupe: the single-element form still canonicalizes
+	got, err := CanonicalizeScopes([]string{"a"})
+	if err != nil || len(got) != 1 {
+		t.Errorf("single element must still canonicalize: %v %v", got, err)
+	}
+	// and the same rejection surfaces through the identity entry point
+	if _, err := ComputeActionRefScopes("a", "t", []string{"a", "a"},
+		"2026-07-10T00:00:00Z"); !errors.Is(err, ErrDuplicateScopeRequired) {
+		t.Errorf("ComputeActionRefScopes must reject duplicates: %v", err)
+	}
+}
+
+func TestCanonicalizeScopesRejectsNFCCollidingDuplicate(t *testing.T) {
+	precomposed := "\u00e9" // U+00E9
+	decomposed := "e\u0301" // e followed by U+0301 combining acute
+	if precomposed == decomposed {
+		t.Fatal("test inputs must differ before normalization")
+	}
+	if norm.NFC.String(precomposed) != norm.NFC.String(decomposed) {
+		t.Fatal("test inputs must collide under NFC")
+	}
+	_, err := CanonicalizeScopes([]string{precomposed, decomposed})
+	if !errors.Is(err, ErrDuplicateScopeRequired) {
+		t.Fatalf("want ErrDuplicateScopeRequired, got %v", err)
+	}
+}
+
+// TestValidVectorsByteUnchanged pins that the duplicate rejection leaves every
+// shared cross-language vector byte-identical, asserted against the recorded
+// action_ref values rather than recomputed ones.
+func TestValidVectorsByteUnchanged(t *testing.T) {
+	_, vectors := loadVectors(t)
+	for _, v := range vectors {
+		got, err := ComputeActionRefScopes(v.Input.AgentID, v.Input.ActionType, v.Input.ScopeRequired, v.Input.Timestamp)
+		if err != nil {
+			t.Fatalf("%s: %v", v.Name, err)
+		}
+		if got != v.ActionRef {
+			t.Errorf("%s: action_ref = %s, want %s", v.Name, got, v.ActionRef)
+		}
 	}
 }

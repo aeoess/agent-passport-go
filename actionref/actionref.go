@@ -11,6 +11,7 @@ package actionref
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -46,10 +47,18 @@ func parseTime(ts string) (time.Time, error) {
 	return time.Time{}, errors.New("actionref: invalid timestamp \"" + ts + "\"")
 }
 
+// ErrDuplicateScopeRequired reports a scopeRequired array holding two elements
+// that are equal after NFC normalization. Section 4.1 defines scope_required as
+// a duplicate-free array, so a duplicated array has no canonical form and is
+// rejected rather than deduplicated: an equality key must not map distinct
+// inputs onto one value silently. Callers branch with errors.Is.
+var ErrDuplicateScopeRequired = errors.New("actionref: duplicate_scope_required")
+
 // CanonicalizeScopes returns the spec-canonical form of a scopeRequired array
 // per draft-pidlisnyi-aps-03 section 4.1: each scope string is normalized to
-// Unicode Normalization Form C, then the array is sorted by Unicode code
-// point. The input slice is never mutated; the result is a fresh copy.
+// Unicode Normalization Form C, duplicates are rejected, then the array is
+// sorted by Unicode code point. The input slice is never mutated; the result is
+// a fresh copy.
 //
 // sort.Strings compares UTF-8 bytes, and for valid UTF-8 the byte order equals
 // Unicode code-point order, so a byte sort after NFC normalization is exactly
@@ -57,13 +66,27 @@ func parseTime(ts string) (time.Time, error) {
 // UTF-16 code-unit order used for JCS object-key sorting in the jcs package:
 // the scopeRequired array sort is a pre-canonicalization step defined by the
 // spec, not part of RFC 8785 itself.
-func CanonicalizeScopes(scopeRequired []string) []string {
+//
+// Duplicates are detected AFTER normalization, so two spellings that collide
+// only under NFC (U+00E9 and "e" + U+0301) reject as well. Valid arrays are
+// byte-unchanged: only duplicated input changes behavior, from a silent
+// identity to ErrDuplicateScopeRequired.
+func CanonicalizeScopes(scopeRequired []string) ([]string, error) {
 	scopes := make([]string, len(scopeRequired))
 	for i, s := range scopeRequired {
 		scopes[i] = norm.NFC.String(s)
 	}
+	seen := make(map[string]struct{}, len(scopes))
+	for _, s := range scopes {
+		if _, dup := seen[s]; dup {
+			return nil, fmt.Errorf(
+				"%w: scope_required contains duplicate elements after NFC normalization: %q",
+				ErrDuplicateScopeRequired, s)
+		}
+		seen[s] = struct{}{}
+	}
 	sort.Strings(scopes)
-	return scopes
+	return scopes, nil
 }
 
 // ComputeActionRefScopes returns the lowercase-hex SHA-256 action_ref for an
@@ -73,12 +96,21 @@ func CanonicalizeScopes(scopeRequired []string) []string {
 // callers supplying the same scopes in different order or in different Unicode
 // normalization forms produce the same action_ref. The caller's slice is not
 // mutated. createdAt is normalized to second precision before hashing.
+//
+// Returns ErrDuplicateScopeRequired (wrapped) when scopeRequired holds two
+// elements equal after NFC normalization. The return happens inside
+// canonicalization, before the digest is computed, so a duplicated array can
+// never present as an identity mismatch downstream: there is no action_ref to
+// compare in the first place.
 func ComputeActionRefScopes(agentID, actionType string, scopeRequired []string, createdAt string) (string, error) {
 	ts, err := NormalizeTimestamp(createdAt)
 	if err != nil {
 		return "", err
 	}
-	scopes := CanonicalizeScopes(scopeRequired)
+	scopes, err := CanonicalizeScopes(scopeRequired)
+	if err != nil {
+		return "", err
+	}
 	scopeVals := make([]interface{}, len(scopes))
 	for i, s := range scopes {
 		scopeVals[i] = s

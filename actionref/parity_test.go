@@ -69,7 +69,11 @@ func TestActionRefCanonicalVectors(t *testing.T) {
 		if got != v.ActionRef {
 			t.Errorf("%s: action_ref = %s, want %s", v.Name, got, v.ActionRef)
 		}
-		canon := CanonicalizeScopes(v.Input.ScopeRequired)
+		canon, err := CanonicalizeScopes(v.Input.ScopeRequired)
+		if err != nil {
+			t.Errorf("%s: CanonicalizeScopes: %v", v.Name, err)
+			continue
+		}
 		if len(canon) != len(v.CanonicalScopeOrder) {
 			t.Errorf("%s: canonical order length %d, want %d", v.Name, len(canon), len(v.CanonicalScopeOrder))
 			continue
