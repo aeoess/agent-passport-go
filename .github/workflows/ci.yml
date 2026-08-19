@@ -27,7 +27,7 @@ jobs:
           path: agent-passport-go
       - uses: actions/checkout@v4
         with:
-          repository: aeoess/aps-conformance-suite
+          repository: Agent-Authority-Conformance/aps-conformance-suite
           path: aps-conformance-suite
       - uses: actions/setup-go@v5
         with:
