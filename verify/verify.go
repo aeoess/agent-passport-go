@@ -24,6 +24,24 @@ const (
 	CodeDepthExceeded = "DELEGATION_DEPTH_EXCEEDED"
 	CodeInvalidSig    = "INVALID_SIGNATURE"
 	CodeValidityExp   = "VALIDITY_EXPIRED"
+
+	// Authorization-only codes. They can only be returned by
+	// VerifyChainAuthorization, never by the structural validator, so a
+	// structural pass can never be read as an authorization pass.
+
+	// CodeUntrustedRoot: the chain root's delegator is not in the caller's
+	// trusted set. A chain that is internally well signed is not thereby
+	// authorized; without this, an attacker who mints their own root and signs
+	// every hop from it produces a structurally perfect chain.
+	CodeUntrustedRoot = "UNTRUSTED_ROOT"
+	// CodeRevoked: the resolver reported a link revoked at the evaluation time.
+	CodeRevoked = "DELEGATION_REVOKED"
+	// CodeRevocationIndeterminate: no revocation context was supplied, so
+	// authorization cannot be decided. This is NOT a positive authorization and
+	// NOT a refusal on the merits: the caller must supply a resolver or treat
+	// the answer as unknown. Legacy chain links carry no revocation member and
+	// none is added here, because they are signed wire objects.
+	CodeRevocationIndeterminate = "REVOCATION_INDETERMINATE"
 )
 
 // VerifyEd25519 verifies a raw Ed25519 signature (64-byte hex) over message
@@ -104,10 +122,29 @@ type ChainInput struct {
 	Now      string                   `json:"now"`
 }
 
-// ValidateChain walks a delegation chain and returns the first refusal code, or
-// "" if the chain is valid. Check order matches the reference validator:
-// depth, then per link root->leaf: validity, signature, scope narrowing.
+// ValidateChain is the former name of ValidateChainStructure.
+//
+// Deprecated: the name reads as a verdict on the whole chain, but it proves
+// STRUCTURE only: linkage, validity windows, per-link signatures, and scope
+// narrowing. It has no trust root and no revocation context, so a chain an
+// attacker minted from their own root passes it. Call ValidateChainStructure
+// when you want that proof, or VerifyChainAuthorization when you want an
+// authorization decision. Kept as an alias so existing callers keep compiling
+// and keep their exact behaviour.
 func ValidateChain(in ChainInput) string {
+	return ValidateChainStructure(in)
+}
+
+// ValidateChainStructure walks a delegation chain and returns the first refusal
+// code, or "" if the chain is structurally sound. Check order matches the
+// reference validator: depth, then per link root->leaf: validity, signature,
+// scope narrowing.
+//
+// "Structurally sound" is not "authorized". This function answers only whether
+// the links hang together and each one is signed by the key it names as its
+// delegator. It does not know which roots the caller trusts and cannot consult
+// revocation. Use VerifyChainAuthorization for a decision.
+func ValidateChainStructure(in ChainInput) string {
 	// A present-but-empty chain (len 0) is not a valid delegation and must be
 	// refused identically to a nil chain: fail-closed. Guarding only nil left an
 	// asymmetric fail-open where an explicit empty array returned "" (valid).
@@ -228,6 +265,82 @@ func parseMillis(ts string) (int64, bool) {
 		return 0, false
 	}
 	return t.UnixMilli(), true
+}
+
+// ---------------------------------------------------------------------------
+// Composition chain AUTHORIZATION (structure plus trust root and revocation).
+// ---------------------------------------------------------------------------
+
+// RevocationResolver answers whether a chain link is revoked at the evaluation
+// time. It returns known=false when it cannot answer, which is not the same as
+// answering "not revoked".
+//
+// Revocation state is NOT carried on the link. Legacy chain links are signed
+// wire objects and adding a member to them would change the bytes the delegator
+// signed, so the state arrives from outside, through this resolver.
+type RevocationResolver func(link map[string]interface{}) (revoked bool, known bool)
+
+// AuthorizationOptions is the external verification context an authorization
+// decision needs and a signed artifact cannot carry.
+type AuthorizationOptions struct {
+	// TrustedRoots are the delegator keys the caller is willing to root a chain
+	// at. An empty set authorizes nothing.
+	TrustedRoots []string
+	// Revocation resolves revocation state. A nil resolver means the caller
+	// supplied no revocation context, and authorization comes back
+	// indeterminate rather than positive.
+	Revocation RevocationResolver
+}
+
+// ChainAuthorization is the proof token a successful authorization returns. It
+// is deliberately a distinct type from the string code ValidateChainStructure
+// returns, so a structural pass cannot be substituted for an authorization pass
+// by accident.
+type ChainAuthorization struct {
+	// Hops is the number of links the authorization covered.
+	Hops int
+}
+
+// VerifyChainAuthorization decides whether a chain authorizes anything. On top
+// of ValidateChainStructure it requires the root delegator to be explicitly
+// trusted and every link to be resolvable as not revoked. It returns the
+// authorization and "" on success, or the zero value and the first refusal code.
+//
+// A nil Revocation resolver yields CodeRevocationIndeterminate. That is the
+// honest answer for a stateless verifier with no revocation context: the
+// alternative, treating "cannot check" as "not revoked", is exactly the
+// fail-open this separation exists to prevent.
+func VerifyChainAuthorization(in ChainInput, opts AuthorizationOptions) (ChainAuthorization, string) {
+	if len(in.Chain) == 0 {
+		return ChainAuthorization{}, CodeInvalidSig
+	}
+	rootDelegator, _ := in.Chain[0]["delegator"].(string)
+	trusted := false
+	for _, r := range opts.TrustedRoots {
+		if r != "" && r == rootDelegator {
+			trusted = true
+			break
+		}
+	}
+	if rootDelegator == "" || !trusted {
+		return ChainAuthorization{}, CodeUntrustedRoot
+	}
+	if code := ValidateChainStructure(in); code != "" {
+		return ChainAuthorization{}, code
+	}
+	if opts.Revocation == nil {
+		return ChainAuthorization{}, CodeRevocationIndeterminate
+	}
+	for _, link := range in.Chain {
+		revoked, known := opts.Revocation(link)
+		if !known {
+			return ChainAuthorization{}, CodeRevocationIndeterminate
+		}
+		if revoked {
+			return ChainAuthorization{}, CodeRevoked
+		}
+	}
+	return ChainAuthorization{Hops: len(in.Chain)}, ""
 }
 
 // ---------------------------------------------------------------------------
