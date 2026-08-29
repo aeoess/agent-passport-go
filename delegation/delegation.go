@@ -95,6 +95,20 @@ func CreateDelegation(opts CreateOptions) (types.Delegation, error) {
 		return types.Delegation{}, errors.New("delegation: delegatedBy and delegatedTo are required")
 	}
 	maxD, curD := opts.MaxDepth, opts.CurrentDepth
+	// A delegation must be self-consistent at issue. currentDepth is a position
+	// in a chain, so it is never negative: a negative position buys extra hops
+	// under any ceiling, which is how an eight-link chain fitted inside
+	// maxDepth 2. And a delegation may not be minted already outside its own
+	// ceiling; CreateDelegation(currentDepth: 5, maxDepth: 1) used to succeed.
+	if curD < 0 {
+		return types.Delegation{}, errors.New("delegation: currentDepth may not be negative")
+	}
+	if maxD < 0 {
+		return types.Delegation{}, errors.New("delegation: maxDepth may not be negative")
+	}
+	if curD > maxD {
+		return types.Delegation{}, errors.New("delegation: currentDepth exceeds maxDepth")
+	}
 	d := types.Delegation{
 		DelegationID:   opts.DelegationID,
 		DelegatedBy:    opts.DelegatedBy,
@@ -182,6 +196,9 @@ func SubDelegate(opts SubDelegateOptions) (types.Delegation, error) {
 	parentDepth := 0
 	if parent.CurrentDepth != nil {
 		parentDepth = *parent.CurrentDepth
+	}
+	if parentDepth < 0 {
+		return types.Delegation{}, errors.New("delegation: parent currentDepth may not be negative")
 	}
 	newDepth := parentDepth + 1
 	if parent.MaxDepth != nil && newDepth > *parent.MaxDepth {
@@ -274,9 +291,17 @@ func SubDelegate(opts SubDelegateOptions) (types.Delegation, error) {
 		}
 	}
 
-	maxD := 1
+	// The child inherits the parent's depth ceiling EXACTLY. When the parent
+	// states none, the child states none: an absent ceiling stays absent rather
+	// than becoming a fabricated 1. Defaulting to 1 invented a bound nobody
+	// stated, and it was the verifier's own refusal: a parent at currentDepth 1
+	// with no maxDepth minted a child at currentDepth 2 carrying maxDepth 1,
+	// which VerifyDelegationChain then refused as "depth limit exceeded". A
+	// minter must never write a bound the verifier will reject.
+	var childMaxDepth *int
 	if parent.MaxDepth != nil {
-		maxD = *parent.MaxDepth
+		inherited := *parent.MaxDepth
+		childMaxDepth = &inherited
 	}
 	child := types.Delegation{
 		DelegationID: opts.DelegationID,
@@ -287,7 +312,7 @@ func SubDelegate(opts SubDelegateOptions) (types.Delegation, error) {
 		// Carry the RESOLVED spend unit forward so a sub-delegation cannot silently drop or change
 		// it (an invocations budget must not become a currency budget across a hop).
 		SpendLimitUnit: childUnit,
-		MaxDepth:       &maxD,
+		MaxDepth:       childMaxDepth,
 		CurrentDepth:   &newDepth,
 		ExpiresAt:      childExpiresAt,
 		NotBefore:      childNotBefore,

@@ -444,6 +444,22 @@ func (b *effectiveBound) narrow(d types.Delegation) error {
 	return nil
 }
 
+// checkDepthFloor refuses a negative currentDepth. currentDepth is a POSITION in
+// a chain, so it is never below zero, and the effective maxDepth is only a real
+// bound on chain length once there is a floor. Without one, a chain that starts
+// at currentDepth -5 fits eight links inside a stated maxDepth of 2: every hop
+// increments by exactly one, every hop stays at or below the ceiling, and the
+// depth rule holds to the letter while failing in purpose.
+func checkDepthFloor(d types.Delegation) error {
+	if d.CurrentDepth != nil && *d.CurrentDepth < 0 {
+		return errors.New("depth below zero: currentDepth is a position in a chain and may not be negative")
+	}
+	if d.MaxDepth != nil && *d.MaxDepth < 0 {
+		return errors.New("depth below zero: maxDepth may not be negative")
+	}
+	return nil
+}
+
 // VerifyDelegationChain checks a typed APS delegation chain (root first) for
 // monotonic narrowing: chain linkage, depth bounds, scope subset under
 // ScopeCovers, non-increasing spend limit, and non-widening expiry. It returns
@@ -463,12 +479,26 @@ func VerifyDelegationChain(chain []types.Delegation) error {
 	if len(chain) == 0 {
 		return errors.New("chain is empty")
 	}
-	// Seed the effective ceiling from the root. Whether the root's own
-	// currentDepth sits inside its own maxDepth is a per-link question, not a
-	// narrowing question: delegation.VerifyDelegationAt reports that one.
+	// Seed the effective ceiling from the root, and check the root against it.
+	// An earlier revision left the root unchecked on the argument that a link's
+	// own depth is answered elsewhere. It is not: VerifyChainAuthorization reads
+	// the a2a map shape, which carries no depth members, and there is no Go
+	// authorization function over a typed chain, so nothing checked the root at
+	// all and VerifyDelegationChain([root]) returned nil for currentDepth 5
+	// under maxDepth 1.
 	var bound effectiveBound
 	if err := bound.narrow(chain[0]); err != nil {
 		return err
+	}
+	if err := checkDepthFloor(chain[0]); err != nil {
+		return err
+	}
+	rootDepth := 0
+	if chain[0].CurrentDepth != nil {
+		rootDepth = *chain[0].CurrentDepth
+	}
+	if bound.maxDepth != nil && rootDepth > *bound.maxDepth {
+		return errors.New("depth limit exceeded")
 	}
 	for i := 1; i < len(chain); i++ {
 		parent, child := chain[i-1], chain[i]
@@ -491,6 +521,9 @@ func VerifyDelegationChain(chain []types.Delegation) error {
 		}
 		if childDepth != parentDepth+1 {
 			return errors.New("depth not monotonic: child.currentDepth must be parent.currentDepth + 1")
+		}
+		if err := checkDepthFloor(child); err != nil {
+			return err
 		}
 		if bound.maxDepth != nil && childDepth > *bound.maxDepth {
 			return errors.New("depth limit exceeded")

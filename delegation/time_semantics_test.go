@@ -10,6 +10,7 @@ package delegation
 import (
 	"testing"
 
+	"github.com/aeoess/agent-passport-go/keys"
 	"github.com/aeoess/agent-passport-go/types"
 	"github.com/aeoess/agent-passport-go/verify"
 )
@@ -80,10 +81,20 @@ func TestVerifyDelegationAtRequiresAnExpiry(t *testing.T) {
 }
 
 func TestVerifyDelegationAtChecksItsOwnDepthBound(t *testing.T) {
-	deep := mustSign(t, CreateOptions{
-		DelegationID: "del_deep", DelegatedTo: "did:aps:b", Scope: []string{"data:read"},
-		MaxDepth: 1, CurrentDepth: 5, ExpiresAt: "2026-07-01T00:00:00.000Z",
-	})
+	// Built and signed directly rather than through CreateDelegation, which now
+	// refuses this shape at mint. The claim under test is that the VERIFIER
+	// catches it independently, for an artifact minted by anything at all.
+	five, one := 5, 1
+	deep := types.Delegation{
+		DelegationID: "del_deep", DelegatedBy: wantPub, DelegatedTo: "did:aps:b",
+		Scope: []string{"data:read"}, MaxDepth: &one, CurrentDepth: &five,
+		ExpiresAt: "2026-07-01T00:00:00.000Z",
+	}
+	sig, err := keys.SignArtifact(canonicalMap(deep), "signature", seed())
+	if err != nil {
+		t.Fatal(err)
+	}
+	deep.Signature = sig
 	if got := VerifyDelegationAt(deep, mustTime(t, "2026-06-15T00:00:00.000Z")); got != ErrDepthExceeded {
 		t.Errorf("currentDepth 5 > maxDepth 1: got %v, want %v", got, ErrDepthExceeded)
 	}
