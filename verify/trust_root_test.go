@@ -84,6 +84,9 @@ func TestStructuralPassIsNotAuthorization(t *testing.T) {
 	if auth.Hops != 2 {
 		t.Errorf("authorization covered %d hops, want 2", auth.Hops)
 	}
+	if !auth.RevocationChecked {
+		t.Error("a successful authorization must report that revocation was established")
+	}
 }
 
 // The deprecated alias must keep its exact old behaviour.

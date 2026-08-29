@@ -299,6 +299,13 @@ type AuthorizationOptions struct {
 type ChainAuthorization struct {
 	// Hops is the number of links the authorization covered.
 	Hops int
+	// RevocationChecked reports whether revocation state was established for
+	// every link. VerifyChainAuthorization only ever returns a token with this
+	// set, because it refuses to succeed without a resolver that can answer.
+	// It is part of the token rather than a footnote in the docs so a caller
+	// reading a token from elsewhere can tell what it establishes, and it
+	// mirrors the Rust ChainAuthorization field of the same meaning.
+	RevocationChecked bool
 }
 
 // VerifyChainAuthorization decides whether a chain authorizes anything. On top
@@ -340,7 +347,7 @@ func VerifyChainAuthorization(in ChainInput, opts AuthorizationOptions) (ChainAu
 			return ChainAuthorization{}, CodeRevoked
 		}
 	}
-	return ChainAuthorization{Hops: len(in.Chain)}, ""
+	return ChainAuthorization{Hops: len(in.Chain), RevocationChecked: true}, ""
 }
 
 // ---------------------------------------------------------------------------
