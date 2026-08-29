@@ -99,3 +99,48 @@ func TestValidateChainAliasUnchanged(t *testing.T) {
 		t.Error("alias changed the nil-chain refusal")
 	}
 }
+
+// C6 from the review: the refusal of a link with an empty not_after had no test,
+// even though its own comment names the fail-open it prevents. parseMillis("")
+// returns the current time, so an empty not_after would otherwise pass the
+// expiry gate as though the link expired exactly now.
+func TestEmptyNotAfterIsRefused(t *testing.T) {
+	a, _ := keys.GenerateKeyPair()
+	b, _ := keys.GenerateKeyPair()
+	big := 10
+	now := "2026-06-01T00:00:00Z"
+
+	link := signedLink(t, a.PrivateKey, a.PublicKey, b.PublicKey, []interface{}{"data:read"})
+	link["validityWindow"] = map[string]interface{}{
+		"not_before": "2020-01-01T00:00:00Z", "not_after": "",
+	}
+	sig, err := keys.SignArtifact(link, "signature", a.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link["signature"] = sig
+	in := verify.ChainInput{Chain: []map[string]interface{}{link}, MaxDepth: &big, Now: now}
+	if code := verify.ValidateChainStructure(in); code != verify.CodeValidityExp {
+		t.Errorf("empty not_after: got %q, want %q", code, verify.CodeValidityExp)
+	}
+
+	// An absent validityWindow is the same refusal, not a never-expiring link.
+	bare := signedLink(t, a.PrivateKey, a.PublicKey, b.PublicKey, []interface{}{"data:read"})
+	delete(bare, "validityWindow")
+	sig, err = keys.SignArtifact(bare, "signature", a.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bare["signature"] = sig
+	in = verify.ChainInput{Chain: []map[string]interface{}{bare}, MaxDepth: &big, Now: now}
+	if code := verify.ValidateChainStructure(in); code != verify.CodeValidityExp {
+		t.Errorf("absent validityWindow: got %q, want %q", code, verify.CodeValidityExp)
+	}
+
+	// A real not_after in the future still passes, so the guard is not blanket.
+	good := signedLink(t, a.PrivateKey, a.PublicKey, b.PublicKey, []interface{}{"data:read"})
+	in = verify.ChainInput{Chain: []map[string]interface{}{good}, MaxDepth: &big, Now: now}
+	if code := verify.ValidateChainStructure(in); code != "" {
+		t.Errorf("valid link refused with %q", code)
+	}
+}

@@ -244,3 +244,56 @@ func TestEmptyTypedChainFailsClosed(t *testing.T) {
 		t.Errorf("single-link chain rejected (%v), must be ACCEPT", err)
 	}
 }
+
+// The effective ceiling is the MINIMUM over the bounded ancestors, not the
+// ceiling of the first bounded ancestor. A mutant that sets the bound once at
+// the root and never tightens it survived all three test suites, because every
+// vector in the table so far had its smallest ceiling at the root. These have it
+// in the middle, which is what discriminates the two readings.
+func TestEffectiveCeilingIsTheMinimumNotTheFirst(t *testing.T) {
+	mk := func(i int, limit *float64) types.Delegation {
+		d := i
+		max := 9
+		return types.Delegation{
+			DelegationID: string(rune('a' + i)), DelegatedBy: string(rune('k' + i)),
+			DelegatedTo: string(rune('k' + i + 1)), Scope: []string{"data:read"},
+			SpendLimit: limit, MaxDepth: &max, CurrentDepth: &d,
+		}
+	}
+	build := func(limits ...*float64) []types.Delegation {
+		chain := make([]types.Delegation, len(limits))
+		for i, l := range limits {
+			chain[i] = mk(i, l)
+		}
+		return chain
+	}
+	cases := []struct {
+		name       string
+		chain      []types.Delegation
+		wantReject bool
+	}{
+		// A tighter middle ancestor binds the leaf. Under a first-ancestor-only
+		// reading the leaf is measured against 100 and passes.
+		{"100 -> 50 -> 75", build(npF(100), npF(50), npF(75)), true},
+		{"100 -> 50 -> absent -> 75", build(npF(100), npF(50), nil, npF(75)), true},
+		{"100 -> 50 -> absent -> absent -> 75", build(npF(100), npF(50), nil, nil, npF(75)), true},
+		{"100 -> 50 -> 60", build(npF(100), npF(50), npF(60)), true},
+		// The same shapes that stay inside the running minimum are accepted.
+		{"100 -> 50 -> 40", build(npF(100), npF(50), npF(40)), false},
+		{"100 -> 50 -> absent -> 40", build(npF(100), npF(50), nil, npF(40)), false},
+		{"100 -> 50 -> absent -> absent -> 50", build(npF(100), npF(50), nil, nil, npF(50)), false},
+		// A five-link descent that tightens at every hop.
+		{"100 -> 80 -> 60 -> 40 -> 20", build(npF(100), npF(80), npF(60), npF(40), npF(20)), false},
+		// The same five ceilings in ascending order must be refused.
+		{"20 -> 40 -> 60 -> 80 -> 100", build(npF(20), npF(40), npF(60), npF(80), npF(100)), true},
+	}
+	for _, c := range cases {
+		err := VerifyDelegationChain(c.chain)
+		if c.wantReject && err == nil {
+			t.Errorf("%s: accepted, must be REJECT", c.name)
+		}
+		if !c.wantReject && err != nil {
+			t.Errorf("%s: rejected (%v), must be ACCEPT", c.name, err)
+		}
+	}
+}
