@@ -449,19 +449,19 @@ func (b *effectiveBound) narrow(d types.Delegation) error {
 // launders it back to unbounded: 100 -> absent -> 1,000,000 passed both pairwise
 // steps. Two hops cannot distinguish the two readings; three can.
 func VerifyDelegationChain(chain []types.Delegation) error {
+	// A present-but-empty chain is not a valid delegation and must fail closed,
+	// exactly as ValidateChainStructure refuses one (APG-01) and as the Rust and
+	// Python chain verifiers do. Returning nil here read "nothing to narrow" as
+	// "narrowing satisfied".
 	if len(chain) == 0 {
-		return nil
+		return errors.New("chain is empty")
 	}
+	// Seed the effective ceiling from the root. Whether the root's own
+	// currentDepth sits inside its own maxDepth is a per-link question, not a
+	// narrowing question: delegation.VerifyDelegationAt reports that one.
 	var bound effectiveBound
 	if err := bound.narrow(chain[0]); err != nil {
 		return err
-	}
-	rootDepth := 0
-	if chain[0].CurrentDepth != nil {
-		rootDepth = *chain[0].CurrentDepth
-	}
-	if bound.maxDepth != nil && rootDepth > *bound.maxDepth {
-		return errors.New("depth limit exceeded")
 	}
 	for i := 1; i < len(chain); i++ {
 		parent, child := chain[i-1], chain[i]

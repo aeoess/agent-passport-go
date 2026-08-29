@@ -229,3 +229,18 @@ func TestNotBeforeSurvivesOmission(t *testing.T) {
 		t.Error("unparseable notBefore accepted, must be REJECT (fail closed)")
 	}
 }
+
+// An explicit empty chain is not a valid delegation. Returning nil read
+// "nothing to narrow" as "narrowing satisfied"; Rust and Python both refuse.
+func TestEmptyTypedChainFailsClosed(t *testing.T) {
+	if err := VerifyDelegationChain(nil); err == nil {
+		t.Error("nil chain accepted, must fail closed")
+	}
+	if err := VerifyDelegationChain([]types.Delegation{}); err == nil {
+		t.Error("empty chain accepted, must fail closed")
+	}
+	one := link("root", "a", 0, npF(100), "")
+	if err := VerifyDelegationChain([]types.Delegation{one}); err != nil {
+		t.Errorf("single-link chain rejected (%v), must be ACCEPT", err)
+	}
+}
