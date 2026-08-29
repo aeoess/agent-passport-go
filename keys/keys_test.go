@@ -146,3 +146,22 @@ func TestSignArtifactStripsSignatureField(t *testing.T) {
 		t.Error("SignArtifact signature does not verify over stripped canonical bytes")
 	}
 }
+
+// keys.Verify is a second exported entrypoint into the same primitive. It must
+// inherit Ed25519 admissibility, so a small-order public key is refused here
+// too. The public key is the Edwards identity and the signature is R = the
+// identity with s = 0, which satisfies the RFC 8032 equation for every message.
+func TestVerifyRejectsSmallOrderPublicKey(t *testing.T) {
+	const identityKey = "0100000000000000000000000000000000000000000000000000000000000000"
+	const degenerateSig = "0100000000000000000000000000000000000000000000000000000000000000" +
+		"0000000000000000000000000000000000000000000000000000000000000000"
+	for _, msg := range []string{
+		"APS admissibility probe",
+		"a completely different message",
+		"",
+	} {
+		if Verify(msg, degenerateSig, identityKey) {
+			t.Errorf("keys.Verify accepted a small order public key over %q", msg)
+		}
+	}
+}

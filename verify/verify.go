@@ -29,6 +29,10 @@ const (
 // VerifyEd25519 verifies a raw Ed25519 signature (64-byte hex) over message
 // under a raw 32-byte public key (hex). The reference SDK and the conformance
 // runners sign over the UTF-8 canonical bytes.
+//
+// The public key and the signature's R must both be admissible: the canonical
+// encoding of a point that is not of small order. See ed25519_admissibility.go
+// for why crypto/ed25519 alone is not enough.
 func VerifyEd25519(message []byte, sigHex, pubHex string) bool {
 	if len(pubHex) != 64 {
 		return false
@@ -39,6 +43,9 @@ func VerifyEd25519(message []byte, sigHex, pubHex string) bool {
 	}
 	sig, err := hex.DecodeString(sigHex)
 	if err != nil || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	if !admissiblePoint(pub) || !admissiblePoint(sig[:32]) {
 		return false
 	}
 	return ed25519.Verify(ed25519.PublicKey(pub), message, sig)
