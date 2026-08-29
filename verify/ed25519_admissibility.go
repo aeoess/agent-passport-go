@@ -18,19 +18,43 @@ import (
 // the message proves nothing about the artifact carrying it.
 //
 // The rule enforced here is the behaviour on which the two strict
-// implementations in the APS family agree: libsodium (agent-passport-python)
-// and ed25519-dalek verify_strict (agent-passport-system aps-verifier-core).
-// They were run over a corpus of 2534 vectors, including the Wycheproof
-// Ed25519 suite, all eight small-order points in every encoding, small-order R
-// under honest keys, non-canonical encodings, s >= L, and 2048 ordinary
-// generated keys, and agreed on every one. A public key or an R is admissible
-// only when its 32 bytes are the canonical encoding of a point that is not of
-// small order.
+// implementations in the APS family were OBSERVED to agree: libsodium
+// (agent-passport-python) and ed25519-dalek verify_strict
+// (agent-passport-system aps-verifier-core). They were run over a corpus of
+// 2562 vectors, including the Wycheproof Ed25519 suite, all eight small-order
+// points in every encoding, small-order R under honest keys, small-order A
+// under an ordinary full-order R, non-canonical encodings, s >= L, and 2048
+// ordinary generated keys, and agreed on every one.
 //
-// The third strict condition, a scalar s reduced modulo the group order, is
-// already enforced by crypto/ed25519, which decodes s with
-// edwards25519.Scalar.SetCanonicalBytes. testdata/ed25519-admissibility-v1.json
-// pins that, so the delegation would be caught if it ever stopped holding.
+// That agreement is about observable accept and reject. It is NOT a claim that
+// the two run the same internal checks, and they do not. Established by
+// execution against ed25519-dalek 2.2.0: VerifyingKey::from_bytes ACCEPTS a
+// non-canonically encoded public key, so verify_strict has no canonical
+// encoding test on A at all.
+//
+// So the two conditions the vectors actually force are: a public key or an R
+// whose decoded point has small order is refused, and a scalar s that is not
+// reduced modulo the group order is refused. The third condition is already
+// enforced by crypto/ed25519, which decodes s with
+// edwards25519.Scalar.SetCanonicalBytes; testdata/ed25519-admissibility-v1.json
+// pins that so it would be caught if it ever stopped holding.
+//
+// The canonical-encoding test below goes BEYOND what any behavioural vector can
+// force, and it is kept as hygiene rather than because a test pins it. The
+// reason it cannot be forced: a non-canonical encoding exists only for
+// y < 19, and producing a signature that satisfies the equation under such a
+// point of large order would require that point's discrete logarithm. It is
+// kept because two byte strings naming one key is a key-equivocation surface,
+// and because libsodium refuses them.
+//
+// LIMIT, worth stating plainly. Admissibility does not make a public key an
+// identity. For any honest key A and any 8-torsion point T, A' = A + T is
+// canonical, is not of small order, and passes every test here, and a holder
+// of A's private key can sign for A' with at most eight hashes of grinding.
+// The eight torsion aliases of one key are therefore all admissible and all
+// distinct. Anything that must bind to a single principal has to compare the
+// key, or resolve it through an allowlist, rather than infer identity from a
+// signature verifying.
 //
 // edwards25519 is the Go cryptography maintainer's published extraction of the
 // standard library's own crypto/internal/edwards25519, so this adds no new

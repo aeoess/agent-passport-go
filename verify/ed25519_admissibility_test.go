@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"testing"
+
+	"github.com/aeoess/agent-passport-go/jcs"
 )
 
 // admissibilityDoc is testdata/ed25519-admissibility-v1.json: the behaviour on
@@ -16,9 +18,20 @@ import (
 // TypeScript, Rust and Python suites, so all four implementations answer every
 // vector the same way by construction.
 type admissibilityDoc struct {
-	Version string               `json:"version"`
-	Count   int                  `json:"count"`
-	Vectors []admissibilityVector `json:"vectors"`
+	Version         string                `json:"version"`
+	Count           int                   `json:"count"`
+	Vectors         []admissibilityVector `json:"vectors"`
+	ArtifactVectors artifactVector        `json:"artifact_vectors"`
+}
+
+// artifactVector is a real delegation whose canonical bytes satisfy the RFC
+// 8032 equation under a small order public key, with a full order canonical R
+// and s < L. It was minted with no private key.
+type artifactVector struct {
+	Note              string                 `json:"note"`
+	PublicKeyHex      string                 `json:"public_key_hex"`
+	CanonicalPreimage string                 `json:"canonical_preimage"`
+	Delegation        map[string]interface{} `json:"delegation"`
 }
 
 type admissibilityVector struct {
@@ -54,8 +67,8 @@ func loadAdmissibility(t *testing.T) admissibilityDoc {
 // The RFC 8032 equation degenerates to identity = identity, so this one
 // signature verifies under every message unless admissibility is checked.
 const (
-	identityKey    = "0100000000000000000000000000000000000000000000000000000000000000"
-	degenerateSig  = "0100000000000000000000000000000000000000000000000000000000000000" +
+	identityKey   = "0100000000000000000000000000000000000000000000000000000000000000"
+	degenerateSig = "0100000000000000000000000000000000000000000000000000000000000000" +
 		"0000000000000000000000000000000000000000000000000000000000000000"
 )
 
@@ -193,5 +206,96 @@ func TestChainLinkWithSmallOrderSignerIsRefused(t *testing.T) {
 	}
 	if code := ValidateChain(in); code != CodeInvalidSig {
 		t.Fatalf("chain with an inadmissible signer key returned %q, want %q", code, CodeInvalidSig)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The public-key half of admissibility, isolated.
+//
+// Every vector above that carries a small order public key also carries
+// R = the identity, so the test on R alone refuses it and the test on A is
+// never exercised. Dropping the check on A would leave those tests green.
+//
+// These vectors close that. Take a canonical order 8 public key, pick any r,
+// set R = [r]B, and grind the message until k = H(R||A||M) mod L is divisible
+// by 8. Then [k]A is the identity and [s]B = R + [k]A holds with s = r. R is a
+// full order, canonically encoded point and s < L, so the R half of the check
+// passes it and only the test on A refuses it.
+// ---------------------------------------------------------------------------
+
+func TestSmallOrderPublicKeyWithFullOrderRIsRejected(t *testing.T) {
+	doc := loadAdmissibility(t)
+	n := 0
+	for _, v := range doc.Vectors {
+		if v.Group != "small_order_A_full_order_R" {
+			continue
+		}
+		if VerifyEd25519([]byte(v.Message), v.Signature, v.PublicKey) {
+			t.Errorf("%s accepted a small order public key carrying an ordinary R: %s",
+				v.ID, v.Note)
+		}
+		n++
+	}
+	if n != 28 {
+		t.Fatalf("expected the isolating vectors, got %d", n)
+	}
+}
+
+// The R half must stay independently forced too: these carry a small order R
+// under an honest, full order public key, so only the test on R refuses them.
+func TestAdmissibilityHalvesAreIndependentlyForced(t *testing.T) {
+	doc := loadAdmissibility(t)
+	var aOnly, rOnly int
+	for _, v := range doc.Vectors {
+		switch {
+		case v.Group == "small_order_A_full_order_R":
+			aOnly++
+		case v.Group == "small_order_R_honest_key" && len(v.ID) >= 14 && v.ID[:14] == "smallR-honest-":
+			rOnly++
+		}
+	}
+	if aOnly == 0 {
+		t.Fatal("no vector isolates the public-key half of the check")
+	}
+	if rOnly == 0 {
+		t.Fatal("no vector isolates the R half of the check")
+	}
+	t.Logf("public-key half forced by %d vectors, R half by %d", aOnly, rOnly)
+}
+
+// Artifact path. VerifyCanonicalSignature is the funnel every APS artifact
+// verifier in this module reaches. The delegation below grants
+// payments:transfer and admin:*, and it was minted with no private key.
+func TestDelegationWithSmallOrderSignerAndOrdinaryRIsRefused(t *testing.T) {
+	doc := loadAdmissibility(t)
+	av := doc.ArtifactVectors
+	if av.PublicKeyHex == "" || av.Delegation == nil {
+		t.Fatal("fixture carries no artifact vector")
+	}
+	sig, _ := av.Delegation["signature"].(string)
+	if sig == "" {
+		t.Fatal("artifact vector has no signature")
+	}
+
+	// The canonical bytes this module computes must be the ones the signature
+	// was ground against, otherwise the test would pass for the wrong reason.
+	rest := map[string]interface{}{}
+	for k, v := range av.Delegation {
+		if k != "signature" {
+			rest[k] = v
+		}
+	}
+	canon, err := jcs.Canonicalize(rest)
+	if err != nil {
+		t.Fatalf("canonicalize: %v", err)
+	}
+	if canon != av.CanonicalPreimage {
+		t.Fatalf("canonical bytes differ from the fixture preimage:\n got %q\nwant %q",
+			canon, av.CanonicalPreimage)
+	}
+
+	if VerifyCanonicalSignature(av.Delegation, "signature", sig, av.PublicKeyHex) {
+		t.Error("a delegation granting payments:transfer and admin:*, minted with " +
+			"no private key, was accepted under a small order signer")
 	}
 }
