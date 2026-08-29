@@ -10,6 +10,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
+	"math"
 	"strings"
 	"time"
 
@@ -405,7 +406,17 @@ func (b *effectiveBound) narrow(d types.Delegation) error {
 		// narrowing rather than conversion.
 		b.spendUnit = stated
 	}
-	// Spend ceiling: the minimum over the bounded ancestors.
+	// Spend ceiling: the minimum over the bounded ancestors. A non-finite
+	// ceiling is refused before it is compared: every comparison against NaN is
+	// false, so a NaN ceiling erased the bound and let the ceilings INCREASE
+	// down the chain (NaN, 1e12, 2e12, 3e12, 4e12 verified). commerce.RecordSpend
+	// in this repo already guards IsNaN and IsInf for the spend AMOUNT; the same
+	// rule belongs on the ceiling. It is not reachable over the wire, because JCS
+	// refuses to canonicalize a non-finite number and so it can never be signed,
+	// but it is reachable in process by any caller that builds a struct.
+	if d.SpendLimit != nil && (math.IsNaN(*d.SpendLimit) || math.IsInf(*d.SpendLimit, 0)) {
+		return errors.New("spend limit is not a finite number")
+	}
 	if d.SpendLimit != nil {
 		if b.spendLimit != nil && *d.SpendLimit > *b.spendLimit {
 			return errors.New("spend limit widening: child exceeds the effective inherited ceiling")
