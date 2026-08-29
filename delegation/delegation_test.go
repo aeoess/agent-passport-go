@@ -10,8 +10,10 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aeoess/agent-passport-go/keys"
+	"github.com/aeoess/agent-passport-go/verify"
 )
 
 // Deterministic inputs shared with the TS reference cross-check.
@@ -33,6 +35,17 @@ func seed() string {
 
 func f(v float64) *float64 { return &v }
 
+// mustTime parses a fixed evaluation time so temporal assertions never depend on
+// the wall clock.
+func mustTime(t *testing.T, ts string) time.Time {
+	t.Helper()
+	parsed, ok := verify.ParseTimestamp(ts)
+	if !ok {
+		t.Fatalf("bad test timestamp %q", ts)
+	}
+	return parsed
+}
+
 func fixedDelegation(t *testing.T) string {
 	t.Helper()
 	d, err := CreateDelegation(CreateOptions{
@@ -51,8 +64,11 @@ func fixedDelegation(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !VerifyDelegation(d) {
-		t.Fatal("self-created delegation failed VerifyDelegation")
+	// Signature round-trip only. This vector's expiresAt is in the past, and
+	// VerifyDelegation now also enforces the validity window; the claim under
+	// test here is byte/signature identity with the TS reference, not liveness.
+	if !VerifyDelegationSignature(d) {
+		t.Fatal("self-created delegation failed VerifyDelegationSignature")
 	}
 	return d.Signature
 }
@@ -109,13 +125,13 @@ func TestSubDelegateNarrowing(t *testing.T) {
 		Parent: parent, PrivateKey: seed(), DelegationID: "del_child",
 		DelegatedTo: "did:aps:b", Scope: []string{"data:read"}, SpendLimit: f(200),
 		ExpiresAt: "2026-06-30T00:00:00.000Z", NotBefore: "2026-06-03T12:00:00.000Z",
-		CreatedAt: "2026-06-03T12:00:00.000Z",
+		CreatedAt: "2026-06-03T12:00:00.000Z", Now: "2026-06-10T00:00:00.000Z",
 	})
 	if err != nil {
 		t.Fatalf("valid sub-delegation rejected: %v", err)
 	}
-	if !VerifyDelegation(child) {
-		t.Error("valid child failed verify")
+	if err := VerifyDelegationAt(child, mustTime(t, "2026-06-10T00:00:00.000Z")); err != nil {
+		t.Errorf("valid child failed verify: %v", err)
 	}
 	if child.CurrentDepth == nil || *child.CurrentDepth != 1 {
 		t.Error("child currentDepth should be 1")
@@ -124,6 +140,7 @@ func TestSubDelegateNarrowing(t *testing.T) {
 	if _, err := SubDelegate(SubDelegateOptions{
 		Parent: parent, PrivateKey: seed(), DelegationID: "x", DelegatedTo: "did:aps:b",
 		Scope: []string{"commerce:checkout"}, ExpiresAt: "2026-06-30T00:00:00.000Z",
+		Now: "2026-06-10T00:00:00.000Z",
 	}); err == nil {
 		t.Error("scope-widening sub-delegation accepted (must reject)")
 	}
@@ -131,6 +148,7 @@ func TestSubDelegateNarrowing(t *testing.T) {
 	if _, err := SubDelegate(SubDelegateOptions{
 		Parent: parent, PrivateKey: seed(), DelegationID: "x", DelegatedTo: "did:aps:b",
 		Scope: []string{"data:read"}, SpendLimit: f(900), ExpiresAt: "2026-06-30T00:00:00.000Z",
+		Now: "2026-06-10T00:00:00.000Z",
 	}); err == nil {
 		t.Error("spend-widening sub-delegation accepted (must reject)")
 	}

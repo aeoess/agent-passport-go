@@ -18,6 +18,7 @@ package delegation
 
 import (
 	"errors"
+	"time"
 
 	"github.com/aeoess/agent-passport-go/jcs"
 	"github.com/aeoess/agent-passport-go/keys"
@@ -35,11 +36,14 @@ type CreateOptions struct {
 	DelegatedTo  string
 	Scope        []string
 	SpendLimit   *float64
-	MaxDepth     int
-	CurrentDepth int
-	ExpiresAt    string
-	NotBefore    string
-	CreatedAt    string
+	// SpendLimitUnit labels SpendLimit. An empty unit alongside a SpendLimit
+	// means the default unit "currency", matching the reference SDK.
+	SpendLimitUnit string
+	MaxDepth       int
+	CurrentDepth   int
+	ExpiresAt      string
+	NotBefore      string
+	CreatedAt      string
 }
 
 // canonicalMap builds the exact field set the reference SDK signs over. Optional
@@ -92,16 +96,17 @@ func CreateDelegation(opts CreateOptions) (types.Delegation, error) {
 	}
 	maxD, curD := opts.MaxDepth, opts.CurrentDepth
 	d := types.Delegation{
-		DelegationID: opts.DelegationID,
-		DelegatedBy:  opts.DelegatedBy,
-		DelegatedTo:  opts.DelegatedTo,
-		Scope:        opts.Scope,
-		SpendLimit:   opts.SpendLimit,
-		MaxDepth:     &maxD,
-		CurrentDepth: &curD,
-		ExpiresAt:    opts.ExpiresAt,
-		NotBefore:    opts.NotBefore,
-		CreatedAt:    opts.CreatedAt,
+		DelegationID:   opts.DelegationID,
+		DelegatedBy:    opts.DelegatedBy,
+		DelegatedTo:    opts.DelegatedTo,
+		Scope:          opts.Scope,
+		SpendLimit:     opts.SpendLimit,
+		SpendLimitUnit: opts.SpendLimitUnit,
+		MaxDepth:       &maxD,
+		CurrentDepth:   &curD,
+		ExpiresAt:      opts.ExpiresAt,
+		NotBefore:      opts.NotBefore,
+		CreatedAt:      opts.CreatedAt,
 	}
 	sig, err := keys.SignArtifact(canonicalMap(d), "signature", opts.PrivateKey)
 	if err != nil {
@@ -121,21 +126,58 @@ type SubDelegateOptions struct {
 	DelegatedTo  string
 	Scope        []string
 	SpendLimit   *float64
-	ExpiresAt    string
-	NotBefore    string
-	CreatedAt    string
+	// SpendLimitUnit labels SpendLimit. Leave it empty to inherit the parent's
+	// unit; stating a different one is a conversion, which the narrowing layer
+	// refuses.
+	SpendLimitUnit string
+	ExpiresAt      string
+	NotBefore      string
+	CreatedAt      string
+	// Now is the evaluation time for the parent's validity window, RFC3339. Leave
+	// it empty to use the real clock. Tests set it so issuance is deterministic.
+	Now string
+}
+
+// statedSpendUnit is the unit a delegation asserts. A bare SpendLimit with no
+// explicit SpendLimitUnit asserts the default unit "currency", matching the
+// reference SDK (src/core/delegation.ts). An empty result means the delegation
+// binds no spend dimension at all.
+func statedSpendUnit(d types.Delegation) string {
+	if d.SpendLimitUnit != "" {
+		return d.SpendLimitUnit
+	}
+	if d.SpendLimit != nil {
+		return "currency"
+	}
+	return ""
 }
 
 // SubDelegate validates monotonic narrowing against the parent, then issues the
-// signed child. Narrowing uses verify.ScopeCovers and the depth bound from the
+// signed child. Narrowing uses verify.ScopeCovers and the bounds carried by the
 // parent, matching the reference subDelegate refusal semantics.
+//
+// Every bound the caller omits is MATERIALIZED from the parent rather than left
+// absent. A bounded ancestor facet must not become unconstrained because a
+// sub-delegation call omitted the field, and the minter must never produce a
+// chain this repo's own verifier refuses. The child therefore carries the
+// parent's spend limit and unit, the parent's expiry (or the earlier of the two),
+// and the parent's notBefore (or the later of the two).
 func SubDelegate(opts SubDelegateOptions) (types.Delegation, error) {
 	parent := opts.Parent
-	// Verify the parent before minting a child. Previously SubDelegate trusted any parent struct, so
-	// a forged or invalid parent signature could mint an authority-bearing child (parity with the
-	// Python sub_delegate parent check).
-	if !VerifyDelegation(parent) {
-		return types.Delegation{}, errors.New("delegation: cannot sub-delegate from a parent with an invalid signature")
+	now := time.Now().UTC()
+	if opts.Now != "" {
+		t, ok := verify.ParseTimestamp(opts.Now)
+		if !ok {
+			return types.Delegation{}, errors.New("delegation: Now is not a valid timestamp")
+		}
+		now = t
+	}
+	// Verify the parent before minting a child: signature AND validity window. Previously
+	// SubDelegate trusted any parent struct, so a forged or invalid parent signature could mint an
+	// authority-bearing child (parity with the Python sub_delegate parent check), and it consulted
+	// no clock at all, so an expired or not-yet-valid parent could still mint.
+	if err := VerifyDelegationAt(parent, now); err != nil {
+		return types.Delegation{}, errors.New("delegation: cannot sub-delegate from an invalid parent: " + err.Error())
 	}
 	parentDepth := 0
 	if parent.CurrentDepth != nil {
@@ -157,9 +199,81 @@ func SubDelegate(opts SubDelegateOptions) (types.Delegation, error) {
 			return types.Delegation{}, errors.New("delegation: scope violation, child scope not covered by parent")
 		}
 	}
-	if parent.SpendLimit != nil && opts.SpendLimit != nil && *opts.SpendLimit > *parent.SpendLimit {
+
+	// Spend unit. Once the parent binds a unit, the child may not change it; a
+	// declared currency conversion belongs at the payment-rails layer, not here.
+	// A child may still introduce a unit on an otherwise unconstrained parent,
+	// which is narrowing rather than conversion.
+	parentUnit := statedSpendUnit(parent)
+	childUnit := opts.SpendLimitUnit
+	if childUnit == "" {
+		childUnit = parentUnit
+	}
+	if parentUnit != "" && childUnit != parentUnit {
+		return types.Delegation{}, errors.New("delegation: spend unit change, child must carry the parent spendLimitUnit unchanged")
+	}
+	// Spend ceiling. The cap and the inheritance apply only when parent and child
+	// share a bounded budget in the same unit.
+	sharesParentBudget := parentUnit != "" && childUnit == parentUnit && parent.SpendLimit != nil
+	if sharesParentBudget && opts.SpendLimit != nil && *opts.SpendLimit > *parent.SpendLimit {
 		return types.Delegation{}, errors.New("delegation: spend limit exceeds parent")
 	}
+	childLimit := opts.SpendLimit
+	if childLimit == nil && sharesParentBudget {
+		inherited := *parent.SpendLimit
+		childLimit = &inherited
+	}
+
+	// Temporal narrowing. The child expiry is the earlier of the requested one
+	// and the parent's; omitting it inherits the parent's rather than minting a
+	// child with no expiry under a parent that has one.
+	childExpiresAt := opts.ExpiresAt
+	if parent.ExpiresAt != "" {
+		pe, ok := verify.ParseTimestamp(parent.ExpiresAt)
+		if !ok {
+			return types.Delegation{}, errors.New("delegation: parent expiresAt is non-empty but invalid")
+		}
+		if childExpiresAt == "" {
+			childExpiresAt = parent.ExpiresAt
+		} else {
+			ce, ok := verify.ParseTimestamp(childExpiresAt)
+			if !ok {
+				return types.Delegation{}, errors.New("delegation: expiresAt is non-empty but invalid")
+			}
+			if ce.After(pe) {
+				childExpiresAt = parent.ExpiresAt
+			}
+		}
+	} else if childExpiresAt != "" {
+		if _, ok := verify.ParseTimestamp(childExpiresAt); !ok {
+			return types.Delegation{}, errors.New("delegation: expiresAt is non-empty but invalid")
+		}
+	}
+	// The child activation floor is the later of the requested one and the
+	// parent's; omitting it inherits the parent's.
+	childNotBefore := opts.NotBefore
+	if parent.NotBefore != "" {
+		pn, ok := verify.ParseTimestamp(parent.NotBefore)
+		if !ok {
+			return types.Delegation{}, errors.New("delegation: parent notBefore is non-empty but invalid")
+		}
+		if childNotBefore == "" {
+			childNotBefore = parent.NotBefore
+		} else {
+			cn, ok := verify.ParseTimestamp(childNotBefore)
+			if !ok {
+				return types.Delegation{}, errors.New("delegation: notBefore is non-empty but invalid")
+			}
+			if cn.Before(pn) {
+				childNotBefore = parent.NotBefore
+			}
+		}
+	} else if childNotBefore != "" {
+		if _, ok := verify.ParseTimestamp(childNotBefore); !ok {
+			return types.Delegation{}, errors.New("delegation: notBefore is non-empty but invalid")
+		}
+	}
+
 	maxD := 1
 	if parent.MaxDepth != nil {
 		maxD = *parent.MaxDepth
@@ -169,14 +283,14 @@ func SubDelegate(opts SubDelegateOptions) (types.Delegation, error) {
 		DelegatedBy:  parent.DelegatedTo,
 		DelegatedTo:  opts.DelegatedTo,
 		Scope:        opts.Scope,
-		SpendLimit:   opts.SpendLimit,
-		// Carry the parent's spend unit forward so a sub-delegation cannot silently drop or change
+		SpendLimit:   childLimit,
+		// Carry the RESOLVED spend unit forward so a sub-delegation cannot silently drop or change
 		// it (an invocations budget must not become a currency budget across a hop).
-		SpendLimitUnit: parent.SpendLimitUnit,
+		SpendLimitUnit: childUnit,
 		MaxDepth:       &maxD,
 		CurrentDepth:   &newDepth,
-		ExpiresAt:      opts.ExpiresAt,
-		NotBefore:      opts.NotBefore,
+		ExpiresAt:      childExpiresAt,
+		NotBefore:      childNotBefore,
 		CreatedAt:      opts.CreatedAt,
 	}
 	sig, err := keys.SignArtifact(canonicalMap(child), "signature", opts.PrivateKey)
@@ -187,9 +301,23 @@ func SubDelegate(opts SubDelegateOptions) (types.Delegation, error) {
 	return child, nil
 }
 
-// VerifyDelegation checks a typed delegation's signature against its delegatedBy
-// key. It touches no private key.
-func VerifyDelegation(d types.Delegation) bool {
+// Delegation validity failures returned by VerifyDelegationAt. Stable
+// categories, matching the Rust DelegationError variants.
+var (
+	ErrInvalidSignature = errors.New("delegation: invalid signature")
+	ErrInvalidExpiry    = errors.New("delegation: expiresAt is missing or unparseable")
+	ErrExpired          = errors.New("delegation: expired")
+	ErrInvalidNotBefore = errors.New("delegation: notBefore is unparseable")
+	ErrNotYetValid      = errors.New("delegation: not yet valid")
+	ErrDepthExceeded    = errors.New("delegation: currentDepth exceeds maxDepth")
+)
+
+// VerifyDelegationSignature checks ONLY that a typed delegation's signature is
+// authentic against its delegatedBy key. It consults no clock and makes no
+// validity claim: an expired or not-yet-valid delegation still has an authentic
+// signature. Callers deciding whether a delegation may be USED want
+// VerifyDelegationAt or VerifyDelegation instead.
+func VerifyDelegationSignature(d types.Delegation) bool {
 	if d.Signature == "" {
 		return false
 	}
@@ -198,6 +326,55 @@ func VerifyDelegation(d types.Delegation) bool {
 		return false
 	}
 	return keys.Verify(canon, d.Signature, d.DelegatedBy)
+}
+
+// VerifyDelegationAt is the deterministic core: it checks a delegation at an
+// explicit evaluation time and returns nil when the delegation is authentic and
+// live, or the first violation otherwise.
+//
+// expiresAt is part of the signed bytes and is REQUIRED. A missing or
+// unparseable expiry fails closed as expired rather than meaning "never
+// expires", matching the reference SDK (new Date(undefined) is NaN, which the
+// reference reports as an invalid expiresAt) and the Rust verifier.
+func VerifyDelegationAt(d types.Delegation, now time.Time) error {
+	if !VerifyDelegationSignature(d) {
+		return ErrInvalidSignature
+	}
+	expiry, ok := verify.ParseTimestamp(d.ExpiresAt)
+	if !ok {
+		return ErrInvalidExpiry
+	}
+	// Boundary semantics match the reference: expired only when strictly earlier
+	// than the evaluation time, not yet valid only when strictly later. Equality
+	// on either boundary is live.
+	if expiry.Before(now) {
+		return ErrExpired
+	}
+	if d.NotBefore != "" {
+		notBefore, ok := verify.ParseTimestamp(d.NotBefore)
+		if !ok {
+			return ErrInvalidNotBefore
+		}
+		if notBefore.After(now) {
+			return ErrNotYetValid
+		}
+	}
+	if d.MaxDepth != nil && d.CurrentDepth != nil && *d.CurrentDepth > *d.MaxDepth {
+		return ErrDepthExceeded
+	}
+	return nil
+}
+
+// VerifyDelegation reports whether a typed delegation is authentic AND live
+// right now. It is VerifyDelegationAt against the real clock.
+//
+// Before, this was a signature-only check with no clock, so a delegation that
+// expired in 2020 and one whose notBefore is in 2099 both verified true even
+// though expiresAt and notBefore are part of the signed bytes. Callers that
+// genuinely want the signature alone (a clock-free lineage check, for example)
+// should call VerifyDelegationSignature, which says so in its name.
+func VerifyDelegation(d types.Delegation) bool {
+	return VerifyDelegationAt(d, time.Now().UTC()) == nil
 }
 
 // VerifyDelegationRaw verifies a delegation supplied as a generic JSON map (for

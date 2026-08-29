@@ -23,7 +23,7 @@
 // Crypto dependency: the honest resolved/verified split (see TraceBeneficiary)
 // requires REAL ed25519 verification of the receipt and every delegation hop.
 // Rather than reimplement the canonical crypto, this package imports the shared
-// verifiers (delegation.VerifyDelegation, verify.VerifyCanonicalSignature, jcs,
+// verifiers (delegation.VerifyDelegationSignature, verify.VerifyCanonicalSignature, jcs,
 // keys). TraceBeneficiary is therefore no longer a standalone lookup helper: an
 // empty or forged signature makes `verified` false. The earlier note that this
 // package was declared independent of the delegation package (so both build in
@@ -113,7 +113,7 @@ type DelegationHop struct {
 //	Verified  Real ed25519 verification. keyChain.length>1 AND the receipt
 //	          signature is authentic against the executor key at the chain tail
 //	          AND every hop has SOME matching delegation that passes
-//	          delegation.VerifyDelegation. A forged, empty, or missing signature
+//	          delegation.VerifyDelegationSignature. A forged, empty, or missing signature
 //	          makes Verified false. This is the field to trust.
 type BeneficiaryTrace struct {
 	TraceID       string          `json:"traceId"`
@@ -130,7 +130,7 @@ type BeneficiaryTrace struct {
 //
 // PUBLIC API CHANGE (Beneficiary attribution parity): this struct was enriched
 // from the old lookup-only shape (delegationId, delegatedBy, delegatedTo, scope)
-// to carry the full field set that delegation.VerifyDelegation needs to check a
+// to carry the full field set that delegation.VerifyDelegationSignature needs to check a
 // hop cryptographically. Signature, ExpiresAt, NotBefore, CreatedAt, MaxDepth,
 // CurrentDepth, and SpendLimit are the canonical delegation preimage fields
 // (see delegation.canonicalMap); they were added so a hop can be VERIFIED, not
@@ -265,10 +265,18 @@ func HashReceipt(receipt ActionReceipt) (string, error) {
 //
 //	Verified  Real ed25519: at least one hop, the receipt signature is authentic
 //	          against the executor at the chain tail, AND every hop has SOME
-//	          matching delegation that passes delegation.VerifyDelegation. A hop
-//	          with no valid delegation, or a forged/absent receipt signature,
-//	          breaks Verified. This reuses the canonical verifiers and does not
-//	          reimplement crypto.
+//	          matching delegation whose SIGNATURE is authentic
+//	          (delegation.VerifyDelegationSignature). A hop with no
+//	          signature-authentic delegation, or a forged/absent receipt
+//	          signature, breaks Verified. This reuses the canonical verifiers and
+//	          does not reimplement crypto.
+//
+//	          Verified is a signature-authenticity claim, NOT an authorization
+//	          claim: it deliberately consults no clock, so the trace stays
+//	          deterministic and reproducible, and a hop that has since expired
+//	          still traces. A caller deciding whether the lineage may be ACTED
+//	          on must additionally check each hop with
+//	          delegation.VerifyDelegationAt at the instant it cares about.
 //
 // The reported chain still chooses ONE delegation per hop deterministically
 // (valid-first, then by delegationId; the tail hop prefers the delegation the
@@ -285,9 +293,11 @@ func TraceBeneficiary(
 
 	// everyHopAuthentic is a SECURITY concern kept independent of which
 	// delegation gets reported: a hop is authentic iff SOME matching delegation
-	// passes delegation.VerifyDelegation, so a re-used (from,to) key pair cannot
-	// turn a valid lineage into verified=false, and a hop with no valid
-	// delegation still breaks Verified.
+	// has an authentic signature, so a re-used (from,to) key pair cannot turn a
+	// valid lineage into verified=false, and a hop with no signature-authentic
+	// delegation still breaks Verified. The signature-only check is deliberate:
+	// TraceBeneficiary is clock-free, and Verified claims authenticity, not
+	// live authorization.
 	everyHopAuthentic := true
 	for i := 0; i+1 < len(keyChain); i++ {
 		from := keyChain[i]
@@ -302,7 +312,7 @@ func TraceBeneficiary(
 		anyValid := false
 		for _, d := range delegations {
 			if d.DelegatedBy == from && d.DelegatedTo == to {
-				valid := delegation.VerifyDelegation(d.toTypesDelegation())
+				valid := delegation.VerifyDelegationSignature(d.toTypesDelegation())
 				if valid {
 					anyValid = true
 				}

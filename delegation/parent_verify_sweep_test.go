@@ -27,6 +27,7 @@ func TestSubDelegateRejectsInvalidParentSignature(t *testing.T) {
 		Parent: parent, PrivateKey: seed(), DelegationID: "del_child", DelegatedTo: "did:aps:b",
 		Scope: []string{"data:read"}, SpendLimit: f(100), ExpiresAt: "2026-06-30T00:00:00.000Z",
 		NotBefore: "2026-06-03T12:00:00.000Z", CreatedAt: "2026-06-03T12:00:00.000Z",
+		Now: "2026-06-10T00:00:00.000Z",
 	}); err == nil {
 		t.Fatal("SubDelegate must reject a parent with an invalid signature")
 	}

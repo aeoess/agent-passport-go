@@ -202,16 +202,32 @@ func nestedString(m map[string]interface{}, k1, k2 string) string {
 	return s
 }
 
+// ParseTimestamp parses an APS timestamp in the forms the reference SDK emits.
+// It is the single source of truth for which timestamp spellings this
+// implementation accepts, shared with the delegation package so the issuing and
+// verifying sides never drift apart on what a valid instant looks like. An empty
+// or unparseable value is not a timestamp: ok is false.
+func ParseTimestamp(ts string) (time.Time, bool) {
+	if ts == "" {
+		return time.Time{}, false
+	}
+	for _, l := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.999999999Z0700", "2006-01-02T15:04:05Z0700"} {
+		if t, err := time.Parse(l, ts); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
 func parseMillis(ts string) (int64, bool) {
 	if ts == "" {
 		return time.Now().UTC().UnixMilli(), true
 	}
-	for _, l := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.999999999Z0700", "2006-01-02T15:04:05Z0700"} {
-		if t, err := time.Parse(l, ts); err == nil {
-			return t.UnixMilli(), true
-		}
+	t, ok := ParseTimestamp(ts)
+	if !ok {
+		return 0, false
 	}
-	return 0, false
+	return t.UnixMilli(), true
 }
 
 // ---------------------------------------------------------------------------
