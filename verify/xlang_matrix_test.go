@@ -59,6 +59,29 @@ func TestXLangMatrix(t *testing.T) {
 	two := func(a, b map[string]interface{}) []types.Delegation {
 		return []types.Delegation{mk("root", "a", 0, a), mk("a", "b", 1, b)}
 	}
+	// chainOf builds an n-link chain from per-link extras, for the four- and
+	// five-link vectors that tell a minimum-over-ancestors reading apart from a
+	// first-ancestor-only one.
+	chainOf := func(extras ...map[string]interface{}) []types.Delegation {
+		out := make([]types.Delegation, len(extras))
+		for i, e := range extras {
+			out[i] = mk(fmt.Sprintf("k%d", i), fmt.Sprintf("k%d", i+1), i, d5(e))
+		}
+		return out
+	}
+	spend := func(v interface{}) map[string]interface{} {
+		if v == nil {
+			return e()
+		}
+		return e("spendLimit", v)
+	}
+	depthChain := func(start, count, max int) []types.Delegation {
+		out := make([]types.Delegation, count)
+		for i := 0; i < count; i++ {
+			out[i] = mk(fmt.Sprintf("k%d", i), fmt.Sprintf("k%d", i+1), start+i, e("maxDepth", max))
+		}
+		return out
+	}
 	rows := []struct {
 		name  string
 		chain []types.Delegation
@@ -89,41 +112,67 @@ func TestXLangMatrix(t *testing.T) {
 		{"exp/2030->2029", two(d5(e("expiresAt", "2030-01-01T00:00:00Z")), d5(e("expiresAt", "2029-01-01T00:00:00Z")))},
 		{"scope/read->absent->wildcard", []types.Delegation{mk("root", "a", 0, d5(e("scope", []string{"data:read"}))), mk("a", "b", 1, d5(e("scope", []string{}))), mk("b", "c", 2, d5(e("scope", []string{"data:*"})))}},
 		{"scope/read->absent->absent", []types.Delegation{mk("root", "a", 0, d5(e("scope", []string{"data:read"}))), mk("a", "b", 1, d5(e("scope", []string{}))), mk("b", "c", 2, d5(e("scope", []string{})))}},
+		{"minceil/100->50->75", chainOf(spend(100), spend(50), spend(75))},
+		{"minceil/100->50->absent->75", chainOf(spend(100), spend(50), spend(nil), spend(75))},
+		{"minceil/100->50->absent->absent->75", chainOf(spend(100), spend(50), spend(nil), spend(nil), spend(75))},
+		{"minceil/100->50->40", chainOf(spend(100), spend(50), spend(40))},
+		{"minceil/100->80->60->40->20", chainOf(spend(100), spend(80), spend(60), spend(40), spend(20))},
+		{"minceil/20->40->60->80->100", chainOf(spend(20), spend(40), spend(60), spend(80), spend(100))},
+		{"depthfloor/-5 x8 under max2", depthChain(-5, 8, 2)},
+		{"depthfloor/0,1,2 under max2", depthChain(0, 3, 2)},
+		{"depthfloor/0,1,2,3 under max2", depthChain(0, 4, 2)},
+		{"depthfloor/root depth5 under max1", []types.Delegation{mk("root", "a", 5, e("maxDepth", 1))}},
+		{"depthfloor/negative maxDepth", []types.Delegation{mk("root", "a", 0, e("maxDepth", -1))}},
 		{"empty-chain", []types.Delegation{}},
 	}
 	// The pinned cross-language verdict for every cell. Go, Rust and Python
 	// run the identical table (verify/xlang_matrix_test.go,
 	// tests/xlang_matrix.rs, tests/test_xlang_matrix.py) and must agree on
 	// every one, so a divergence fails here rather than in production.
+	// The pinned cross-language verdict for every cell. Go, Rust and Python
+	// run the identical table (verify/xlang_matrix_test.go,
+	// tests/xlang_matrix.rs, tests/test_xlang_matrix.py) and must agree on
+	// every one, so a divergence fails here rather than in production.
 	want := map[string]string{
-		"spend/100->absent->1000000":   "REJECT",
-		"spend/100->absent->50":        "ACCEPT",
-		"spend/100->100->100":          "ACCEPT",
-		"spend/100->50->50":            "ACCEPT",
-		"spend/100->101->101":          "REJECT",
-		"spend2/100->100":              "ACCEPT",
-		"spend2/100->50":               "ACCEPT",
-		"spend2/100->101":              "REJECT",
-		"unit/USD->absent->JPY50":      "REJECT",
-		"unit/USD->absent->unitless50": "REJECT",
-		"unit/USD->absent->absent":     "ACCEPT",
-		"unit/USD->absent->USD50":      "ACCEPT",
-		"unit/USD->absent->USD101":     "REJECT",
-		"depth/max1->absent->depth2":   "REJECT",
-		"depth/max1->99->depth2":       "REJECT",
-		"depth/max2->absent->depth2":   "ACCEPT",
-		"depth/flat":                   "REJECT",
-		"depth/increment":              "ACCEPT",
-		"nbf/2026-06->absent->2020":    "REJECT",
-		"nbf/2026-06->absent->absent":  "ACCEPT",
-		"nbf/2026-06->absent->2026-07": "ACCEPT",
-		"exp/2030->absent":             "REJECT",
-		"exp/2030->2099":               "REJECT",
-		"exp/2030->2029":               "ACCEPT",
-		"scope/read->absent->wildcard": "REJECT",
-		"scope/read->absent->absent":   "ACCEPT",
-		"empty-chain":                  "REJECT",
-		"malformed/spendLimit-string":  "REJECT",
+		"spend/100->absent->1000000":          "REJECT",
+		"spend/100->absent->50":               "ACCEPT",
+		"spend/100->100->100":                 "ACCEPT",
+		"spend/100->50->50":                   "ACCEPT",
+		"spend/100->101->101":                 "REJECT",
+		"spend2/100->100":                     "ACCEPT",
+		"spend2/100->50":                      "ACCEPT",
+		"spend2/100->101":                     "REJECT",
+		"unit/USD->absent->JPY50":             "REJECT",
+		"unit/USD->absent->unitless50":        "REJECT",
+		"unit/USD->absent->absent":            "ACCEPT",
+		"unit/USD->absent->USD50":             "ACCEPT",
+		"unit/USD->absent->USD101":            "REJECT",
+		"depth/max1->absent->depth2":          "REJECT",
+		"depth/max1->99->depth2":              "REJECT",
+		"depth/max2->absent->depth2":          "ACCEPT",
+		"depth/flat":                          "REJECT",
+		"depth/increment":                     "ACCEPT",
+		"nbf/2026-06->absent->2020":           "REJECT",
+		"nbf/2026-06->absent->absent":         "ACCEPT",
+		"nbf/2026-06->absent->2026-07":        "ACCEPT",
+		"exp/2030->absent":                    "REJECT",
+		"exp/2030->2099":                      "REJECT",
+		"exp/2030->2029":                      "ACCEPT",
+		"scope/read->absent->wildcard":        "REJECT",
+		"scope/read->absent->absent":          "ACCEPT",
+		"minceil/100->50->75":                 "REJECT",
+		"minceil/100->50->absent->75":         "REJECT",
+		"minceil/100->50->absent->absent->75": "REJECT",
+		"minceil/100->50->40":                 "ACCEPT",
+		"minceil/100->80->60->40->20":         "ACCEPT",
+		"minceil/20->40->60->80->100":         "REJECT",
+		"depthfloor/-5 x8 under max2":         "REJECT",
+		"depthfloor/0,1,2 under max2":         "ACCEPT",
+		"depthfloor/0,1,2,3 under max2":       "REJECT",
+		"depthfloor/root depth5 under max1":   "REJECT",
+		"depthfloor/negative maxDepth":        "REJECT",
+		"empty-chain":                         "REJECT",
+		"malformed/spendLimit-string":         "REJECT",
 	}
 	for _, r := range rows {
 		got := verdict(r.chain)
@@ -145,6 +194,6 @@ func TestXLangMatrix(t *testing.T) {
 		}
 	} else {
 		fmt.Printf("CELL malformed/spendLimit-string = ACCEPT\n")
-		t.Error("a string spendLimit must not decode into a typed Delegation")
+		t.Errorf("a string spendLimit must not decode into a typed Delegation: %v", probe)
 	}
 }
