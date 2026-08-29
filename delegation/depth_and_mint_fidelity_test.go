@@ -11,6 +11,7 @@ package delegation
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/aeoess/agent-passport-go/keys"
@@ -207,5 +208,61 @@ func TestOwnDepthBoundWithAbsentCeiling(t *testing.T) {
 	e.Signature = sig
 	if err := VerifyDelegationAt(e, mustTime(t, "2026-06-10T00:00:00.000Z")); err != nil {
 		t.Errorf("maxDepth present with currentDepth absent: %v, want valid", err)
+	}
+}
+
+// R1: SubDelegate's refusal of a negative parent depth had no test, so removing
+// it left the whole Go suite green while the minter went back to minting the
+// runway that made an eight-link chain fit inside maxDepth 2. Only the chain
+// verifier still refused it. Python pins the identical guard by name; this is
+// that test carried across.
+//
+// The assertion is on the MESSAGE, not on the mere presence of an error: a test
+// that only asserted "refused" would pass if the mint failed for any other
+// reason, which is how a guard ends up pinned by accident and unpinned in fact.
+func TestSubDelegateRefusesANegativeParentDepth(t *testing.T) {
+	neg, three := -5, 3
+	parent := types.Delegation{
+		DelegationID: "del_neg", DelegatedBy: wantPub, DelegatedTo: wantPub,
+		Scope: []string{"data:*"}, MaxDepth: &three, CurrentDepth: &neg,
+		ExpiresAt: rootExp, NotBefore: nbf, CreatedAt: nbf,
+	}
+	sig, err := keys.SignArtifact(canonicalMap(parent), "signature", seed())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent.Signature = sig
+	// The parent is genuinely well signed, so nothing else can be doing the
+	// refusing.
+	if !VerifyDelegationSignature(parent) {
+		t.Fatal("probe parent must be signature-valid for this test to mean anything")
+	}
+
+	_, err = SubDelegate(SubDelegateOptions{
+		Parent: parent, PrivateKey: seed(), DelegationID: "del_kid", DelegatedTo: "did:aps:b",
+		Scope: []string{"data:read"}, ExpiresAt: rootExp, NotBefore: nbf, CreatedAt: nbf, Now: mintNow,
+	})
+	if err == nil {
+		t.Fatal("SubDelegate minted from a parent at currentDepth -5")
+	}
+	if !strings.Contains(err.Error(), "parent currentDepth may not be negative") {
+		t.Errorf("refused for the wrong reason: %v", err)
+	}
+
+	// The same parent at a non-negative depth still mints, so the guard is not
+	// blanket.
+	zero := 0
+	ok := parent
+	ok.CurrentDepth = &zero
+	sig, err = keys.SignArtifact(canonicalMap(ok), "signature", seed())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok.Signature = sig
+	if _, err := SubDelegate(SubDelegateOptions{
+		Parent: ok, PrivateKey: seed(), DelegationID: "del_kid", DelegatedTo: "did:aps:b",
+		Scope: []string{"data:read"}, ExpiresAt: rootExp, NotBefore: nbf, CreatedAt: nbf, Now: mintNow,
+	}); err != nil {
+		t.Errorf("a parent at currentDepth 0 must still mint: %v", err)
 	}
 }
