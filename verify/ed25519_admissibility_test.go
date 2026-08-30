@@ -3,6 +3,8 @@
 package verify
 
 import (
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -298,4 +300,133 @@ func TestDelegationWithSmallOrderSignerAndOrdinaryRIsRefused(t *testing.T) {
 		t.Error("a delegation granting payments:transfer and admin:*, minted with " +
 			"no private key, was accepted under a small order signer")
 	}
+}
+
+// ── RETRO-AUDIT C2 / R1 ──────────────────────────────────────────────
+//
+// The R conjunct was pinned only at R = identity. Of the 50 fixture vectors
+// carrying a valid public key and an inadmissible R, 8 were LIVE — refused by
+// the guard AND accepted by a permissive verifier — and all 8 were R = the
+// identity encoding. A=valid x R=small-order was 16/0 and A=valid x R=all-zero
+// was 9/0: every one of those 25 is already refused by crypto/ed25519, so they
+// constrain nothing about the guard. Narrowing the R test to "R != the identity
+// encoding" passed the whole suite.
+//
+// The vectors below close that. Each carries an ADMISSIBLE public key
+// A = A0 + T (A0 prime order, T of order 8, so [8]A != identity) and an R of
+// order 2, 4 and 8. crypto/ed25519 accepts all three; only the small-order test
+// on R refuses them. A fourth vector is the positive control: the same key with
+// a full-order canonical R, which must verify, so a refusal of the three is
+// attributable to the R half and not to the key.
+//
+// LIVENESS IS ASSERTED, NOT ASSUMED. A vector that a permissive verifier also
+// rejects pins nothing, and 24 of the 32 existing small_order_R_honest_key
+// vectors are vacuous in exactly that way. Counting them was the defect
+// (RETRO-AUDIT C9); this test measures instead.
+
+// permissiveVerify is crypto/ed25519 with no APS-side admissibility check: the
+// oracle for whether a negative vector discriminates. If this accepts and
+// VerifyEd25519 refuses, the vector is LIVE and the guard is what refused it.
+func permissiveVerify(t *testing.T, v admissibilityVector) bool {
+	t.Helper()
+	pk, err := hex.DecodeString(v.PublicKey)
+	if err != nil || len(pk) != ed25519.PublicKeySize {
+		return false
+	}
+	sig, err := hex.DecodeString(v.Signature)
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	return ed25519.Verify(ed25519.PublicKey(pk), []byte(v.Message), sig)
+}
+
+func TestSmallOrderRUnderAnAdmissibleTorsionAliasedKeyIsRefusedAndLive(t *testing.T) {
+	doc := loadAdmissibility(t)
+
+	var group []admissibilityVector
+	for _, v := range doc.Vectors {
+		if v.Group == "small_order_R_torsion_alias_A" {
+			group = append(group, v)
+		}
+	}
+	if len(group) != 3 {
+		t.Fatalf("small_order_R_torsion_alias_A carries %d vectors, want 3 (R of order 2, 4 and 8)", len(group))
+	}
+
+	// The R halves must be three DISTINCT small-order encodings, not the same
+	// point three times, and none of them may be the identity: pinning
+	// R = identity three more times is what this test exists to stop.
+	const identityR = "0100000000000000000000000000000000000000000000000000000000000000"
+	seen := map[string]bool{}
+	live := 0
+	for _, v := range group {
+		rHalf := v.Signature[:64]
+		if rHalf == identityR {
+			t.Errorf("%s: R is the identity encoding; the class already pinned by the existing vectors", v.ID)
+		}
+		if seen[rHalf] {
+			t.Errorf("%s: duplicate R half %s", v.ID, rHalf)
+		}
+		seen[rHalf] = true
+
+		if v.Expected {
+			t.Errorf("%s: expected_verification must be false", v.ID)
+			continue
+		}
+		if got := VerifyEd25519([]byte(v.Message), v.Signature, v.PublicKey); got {
+			t.Errorf("%s: the guard ACCEPTED a signature whose R has small order", v.ID)
+		}
+		if !permissiveVerify(t, v) {
+			t.Errorf("%s: VACUOUS. crypto/ed25519 rejects this vector too, so it pins nothing about the guard "+
+				"and would survive a mutation that removed the R check entirely.", v.ID)
+			continue
+		}
+		live++
+	}
+	if live != 3 {
+		t.Fatalf("%d of 3 vectors are LIVE; all three must be accepted by crypto/ed25519 and refused by the guard", live)
+	}
+	t.Logf("R half forced by %d LIVE vectors over %d distinct non-identity small-order R encodings", live, len(seen))
+}
+
+// The positive control. Without it, a guard that refused EVERY signature under a
+// torsion-aliased key would also pass the test above, and the three negatives
+// would not isolate the R half at all.
+func TestTheTorsionAliasedKeyItselfIsAdmissible(t *testing.T) {
+	doc := loadAdmissibility(t)
+
+	var control []admissibilityVector
+	for _, v := range doc.Vectors {
+		if v.Group == "torsion_alias_A_valid_R" {
+			control = append(control, v)
+		}
+	}
+	if len(control) != 1 {
+		t.Fatalf("torsion_alias_A_valid_R carries %d vectors, want 1", len(control))
+	}
+	v := control[0]
+	if !v.Expected {
+		t.Fatalf("%s: the control must be expected_verification true", v.ID)
+	}
+	if !permissiveVerify(t, v) {
+		t.Fatalf("%s: the control does not verify under crypto/ed25519, so it controls nothing", v.ID)
+	}
+	if !VerifyEd25519([]byte(v.Message), v.Signature, v.PublicKey) {
+		t.Fatalf("%s: the guard refused the control, so the refusals above are not attributable to the R half", v.ID)
+	}
+
+	// The control and the three negatives must share one public key, or they do
+	// not isolate anything.
+	for _, n := range doc.Vectors {
+		if n.Group == "small_order_R_torsion_alias_A" && n.PublicKey != v.PublicKey {
+			t.Errorf("%s uses a different public key from the control; the R half is not isolated", n.ID)
+		}
+	}
+
+	// And this is the documented limit, now contradicted by a test rather than
+	// by a comment: the guard admits torsion aliases, so one private key has
+	// eight admissible public keys (RETRO-AUDIT C5). Verifying is CORRECT for a
+	// signature primitive. A consumer that infers identity from "the signature
+	// verified" is the thing this pins against.
+	t.Logf("torsion-aliased public key %s is admissible and verifies", v.PublicKey)
 }
