@@ -41,13 +41,40 @@ except Exception:
     print("REJECT")
 `
 
-const tsStateScript = `import { canonicalizeJCS } from './src/core/canonical-jcs.js'
+// The probe runs from a directory the TEST created, never from inside the SDK
+// checkout, so the import is resolved from APS_TS_REPO rather than from the
+// script's own location. Same shape as the intoto and values cross-impl
+// oracles: a temp .mjs, an absolute dynamic import, and cmd.Dir set to the
+// repo so `npx tsx` and the dependency tree resolve there.
+const tsStateScript = `
+const { canonicalizeJCS } = await import(process.env.APS_TS_REPO + '/src/core/canonical-jcs.ts')
 const s = process.argv[2] === 'lone' ? '\uD800' : '\u{1F600}'
 try { canonicalizeJCS({ v: s }); console.log('ACCEPT') } catch { console.log('REJECT') }
 `
 
 func have(cmd string, args ...string) bool {
 	return exec.Command(cmd, args...).Run() == nil
+}
+
+// crossSDKRepo resolves a reference SDK checkout from an environment variable.
+//
+// RETRO-AUDIT C6. This resolution used to fall back to
+// filepath.Join(os.UserHomeDir(), "agent-passport-<lang>") when the variable
+// was unset. On a developer machine those paths exist, so the fallback was
+// taken silently: the Python branch executed code out of an unrelated real
+// checkout, and the TypeScript branch wrote a probe script INTO a real git
+// working tree the test does not own. Under a hermetic runner the same test
+// skips, so the evidence a CI run produces and the evidence a laptop run
+// produces are not the same evidence, and nothing in a green log says which
+// one you have.
+//
+// There is deliberately no fallback. An unconfigured cross-SDK check skips.
+// The other cross-impl oracles in this repo (attribution, completion, intoto,
+// passport, values, delegation) all resolve this way; this file was the only
+// one that did not, and the only os.UserHomeDir() in the repo.
+// hermeticity_test.go asserts that it stays that way.
+func crossSDKRepo(env string) string {
+	return os.Getenv(env)
 }
 
 func TestCrossSDKLoneSurrogateTerminalState(t *testing.T) {
@@ -60,15 +87,14 @@ func TestCrossSDKLoneSurrogateTerminalState(t *testing.T) {
 		t.Fatalf("Go terminal state for the valid non-BMP scalar = %s, want ACCEPT", got)
 	}
 
-	// Python: terminal sign-preimage state. Skips if python3 or the SDK is absent.
-	pyRepo := os.Getenv("APS_PY_REPO")
-	if pyRepo == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			pyRepo = filepath.Join(home, "agent-passport-python")
-		}
-	}
+	// Python: terminal sign-preimage state. Runs only against the checkout named
+	// by APS_PY_REPO, and skips when it is unset. No home-directory fallback:
+	// see crossSDKRepo.
+	pyRepo := crossSDKRepo("APS_PY_REPO")
 	pySrc := filepath.Join(pyRepo, "src")
-	if have("python3", "--version") && fileExists(filepath.Join(pySrc, "agent_passport", "canonical.py")) {
+	if pyRepo == "" {
+		t.Log("skipping Python cross-check: set APS_PY_REPO to the agent-passport-python checkout to run the cross-impl oracle")
+	} else if have("python3", "--version") && fileExists(filepath.Join(pySrc, "agent_passport", "canonical.py")) {
 		dir := t.TempDir()
 		script := filepath.Join(dir, "state.py")
 		if err := os.WriteFile(script, []byte(pyStateScript), 0o600); err != nil {
@@ -88,27 +114,27 @@ func TestCrossSDKLoneSurrogateTerminalState(t *testing.T) {
 			t.Errorf("Python terminal state for the valid non-BMP scalar = %s, want ACCEPT", got)
 		}
 	} else {
-		t.Log("skipping Python cross-check: python3 or the agent-passport-python SDK is not available")
+		t.Log("skipping Python cross-check: python3 or the agent-passport-python SDK is not available at APS_PY_REPO")
 	}
 
 	// TypeScript: terminal state via canonicalizeJCS. Asserts reject only when the
 	// checkout carries the lone-surrogate fix; otherwise records the state, since
 	// the fix lives on the branch fix/jcs-lone-surrogate.
-	tsRepo := os.Getenv("APS_TS_REPO")
+	tsRepo := crossSDKRepo("APS_TS_REPO")
 	if tsRepo == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			tsRepo = filepath.Join(home, "agent-passport-system")
-		}
-	}
-	if have("npx", "--version") && fileExists(filepath.Join(tsRepo, "src", "core", "canonical-jcs.ts")) {
-		script := filepath.Join(tsRepo, "aps_crosssdk_state_probe.ts")
+		t.Log("skipping TypeScript cross-check: set APS_TS_REPO to the agent-passport-system checkout to run the cross-impl oracle")
+	} else if have("npx", "--version") && fileExists(filepath.Join(tsRepo, "src", "core", "canonical-jcs.ts")) {
+		// The probe lives in a directory this test created and removes. It is
+		// never written into the SDK checkout: that tree belongs to somebody
+		// else and a test must not leave anything in it, not even briefly.
+		script := filepath.Join(t.TempDir(), "aps_crosssdk_state_probe.mjs")
 		if err := os.WriteFile(script, []byte(tsStateScript), 0o600); err != nil {
 			t.Fatalf("write ts script: %v", err)
 		}
-		defer os.Remove(script)
 		runTS := func(mode string) string {
-			cmd := exec.Command("npx", "tsx", filepath.Base(script), mode)
+			cmd := exec.Command("npx", "tsx", script, mode)
 			cmd.Dir = tsRepo
+			cmd.Env = append(os.Environ(), "APS_TS_REPO="+tsRepo)
 			out, err := cmd.Output()
 			if err != nil {
 				t.Fatalf("tsx state (%s): %v", mode, err)
@@ -124,7 +150,7 @@ func TestCrossSDKLoneSurrogateTerminalState(t *testing.T) {
 			t.Logf("TS SDK checkout does NOT reject the lone surrogate (terminal=%s); the TS fix is on branch fix/jcs-lone-surrogate. Go+Python parity is verified; TS parity is pending that branch.", got)
 		}
 	} else {
-		t.Log("skipping TypeScript cross-check: npx or the agent-passport-system SDK is not available")
+		t.Log("skipping TypeScript cross-check: npx or the agent-passport-system SDK is not available at APS_TS_REPO")
 	}
 }
 
