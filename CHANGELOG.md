@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.6.0
+
+Security release. Cross-language parity reference: TypeScript SDK v5.0.0, Rust SDK v0.2.0. The matching git tag v0.6.0 is created and pushed as a separate step.
+
+### Security
+- **`Verify` refuses inadmissible Ed25519 key material.** Small-order points for the public key or for the signature's R, non-canonical encodings, and scalars at or above the group order are rejected before the verification equation runs. `crypto/ed25519` implements the equation and does not reject this material, so a degenerate key and signature pair was accepted for arbitrary messages. All 8 previously released module versions were confirmed by execution to accept it. See the advisory.
+
+### Changed
+- **Chain authorization is separated from chain structure.** The effective authority ceiling is carried down the chain rather than evaluated pairwise, so an omitted bound at an intermediate hop no longer loses a bounded ancestor's ceiling. A non-finite spend ceiling is refused rather than silently ignored, an empty typed chain fails closed, and depth bounds chain length with the minter inventing nothing.
+- **The authorization token states that revocation was established** rather than leaving the caller to assume it.
+
+### Added
+- The Ed25519 admissibility corpus and the cross-language narrowing matrix, both pinned as tests.
+
 ## v0.5.0
 
 Cross-language parity reference: TypeScript SDK v4.3.0, Python SDK v2.10.0. The matching git tag v0.5.0 is created and pushed as a separate step.
