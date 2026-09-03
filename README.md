@@ -80,9 +80,7 @@ verify-only consumer never compiles in private-key code.
 
 Validated against the shared APS conformance fixtures through a Go runner
 (`aps-conformance-suite/runners/go`) that consumes the same vectors as the
-TypeScript runner and imports this SDK. It passes the same set: 37 of 38
-vectors, with one documented skip (a diff-document fixture checked by a separate
-test), identical per-category to the TS reference. The runner additionally
+TypeScript runner and imports this SDK. The current tally is whatever that runner reports on the suite commit it is pinned to, recorded there rather than written here. The runner additionally
 re-signs all 10 bilateral-delegation vectors with the signing core to the
 recorded reference signatures.
 
