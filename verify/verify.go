@@ -10,6 +10,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
+	"math"
 	"strings"
 	"time"
 
@@ -24,11 +25,33 @@ const (
 	CodeDepthExceeded = "DELEGATION_DEPTH_EXCEEDED"
 	CodeInvalidSig    = "INVALID_SIGNATURE"
 	CodeValidityExp   = "VALIDITY_EXPIRED"
+
+	// Authorization-only codes. They can only be returned by
+	// VerifyChainAuthorization, never by the structural validator, so a
+	// structural pass can never be read as an authorization pass.
+
+	// CodeUntrustedRoot: the chain root's delegator is not in the caller's
+	// trusted set. A chain that is internally well signed is not thereby
+	// authorized; without this, an attacker who mints their own root and signs
+	// every hop from it produces a structurally perfect chain.
+	CodeUntrustedRoot = "UNTRUSTED_ROOT"
+	// CodeRevoked: the resolver reported a link revoked at the evaluation time.
+	CodeRevoked = "DELEGATION_REVOKED"
+	// CodeRevocationIndeterminate: no revocation context was supplied, so
+	// authorization cannot be decided. This is NOT a positive authorization and
+	// NOT a refusal on the merits: the caller must supply a resolver or treat
+	// the answer as unknown. Legacy chain links carry no revocation member and
+	// none is added here, because they are signed wire objects.
+	CodeRevocationIndeterminate = "REVOCATION_INDETERMINATE"
 )
 
 // VerifyEd25519 verifies a raw Ed25519 signature (64-byte hex) over message
 // under a raw 32-byte public key (hex). The reference SDK and the conformance
 // runners sign over the UTF-8 canonical bytes.
+//
+// The public key and the signature's R must both be admissible: the canonical
+// encoding of a point that is not of small order. See ed25519_admissibility.go
+// for why crypto/ed25519 alone is not enough.
 func VerifyEd25519(message []byte, sigHex, pubHex string) bool {
 	if len(pubHex) != 64 {
 		return false
@@ -39,6 +62,9 @@ func VerifyEd25519(message []byte, sigHex, pubHex string) bool {
 	}
 	sig, err := hex.DecodeString(sigHex)
 	if err != nil || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	if !admissiblePoint(pub) || !admissiblePoint(sig[:32]) {
 		return false
 	}
 	return ed25519.Verify(ed25519.PublicKey(pub), message, sig)
@@ -97,10 +123,29 @@ type ChainInput struct {
 	Now      string                   `json:"now"`
 }
 
-// ValidateChain walks a delegation chain and returns the first refusal code, or
-// "" if the chain is valid. Check order matches the reference validator:
-// depth, then per link root->leaf: validity, signature, scope narrowing.
+// ValidateChain is the former name of ValidateChainStructure.
+//
+// Deprecated: the name reads as a verdict on the whole chain, but it proves
+// STRUCTURE only: linkage, validity windows, per-link signatures, and scope
+// narrowing. It has no trust root and no revocation context, so a chain an
+// attacker minted from their own root passes it. Call ValidateChainStructure
+// when you want that proof, or VerifyChainAuthorization when you want an
+// authorization decision. Kept as an alias so existing callers keep compiling
+// and keep their exact behaviour.
 func ValidateChain(in ChainInput) string {
+	return ValidateChainStructure(in)
+}
+
+// ValidateChainStructure walks a delegation chain and returns the first refusal
+// code, or "" if the chain is structurally sound. Check order matches the
+// reference validator: depth, then per link root->leaf: validity, signature,
+// scope narrowing.
+//
+// "Structurally sound" is not "authorized". This function answers only whether
+// the links hang together and each one is signed by the key it names as its
+// delegator. It does not know which roots the caller trusts and cannot consult
+// revocation. Use VerifyChainAuthorization for a decision.
+func ValidateChainStructure(in ChainInput) string {
 	// A present-but-empty chain (len 0) is not a valid delegation and must be
 	// refused identically to a nil chain: fail-closed. Guarding only nil left an
 	// asymmetric fail-open where an explicit empty array returned "" (valid).
@@ -195,34 +240,286 @@ func nestedString(m map[string]interface{}, k1, k2 string) string {
 	return s
 }
 
+// ParseTimestamp parses an APS timestamp in the forms the reference SDK emits.
+// It is the single source of truth for which timestamp spellings this
+// implementation accepts, shared with the delegation package so the issuing and
+// verifying sides never drift apart on what a valid instant looks like. An empty
+// or unparseable value is not a timestamp: ok is false.
+func ParseTimestamp(ts string) (time.Time, bool) {
+	if ts == "" {
+		return time.Time{}, false
+	}
+	for _, l := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.999999999Z0700", "2006-01-02T15:04:05Z0700"} {
+		if t, err := time.Parse(l, ts); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
 func parseMillis(ts string) (int64, bool) {
 	if ts == "" {
 		return time.Now().UTC().UnixMilli(), true
 	}
-	for _, l := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.999999999Z0700", "2006-01-02T15:04:05Z0700"} {
-		if t, err := time.Parse(l, ts); err == nil {
-			return t.UnixMilli(), true
+	t, ok := ParseTimestamp(ts)
+	if !ok {
+		return 0, false
+	}
+	return t.UnixMilli(), true
+}
+
+// ---------------------------------------------------------------------------
+// Composition chain AUTHORIZATION (structure plus trust root and revocation).
+// ---------------------------------------------------------------------------
+
+// RevocationResolver answers whether a chain link is revoked at the evaluation
+// time. It returns known=false when it cannot answer, which is not the same as
+// answering "not revoked".
+//
+// Revocation state is NOT carried on the link. Legacy chain links are signed
+// wire objects and adding a member to them would change the bytes the delegator
+// signed, so the state arrives from outside, through this resolver.
+type RevocationResolver func(link map[string]interface{}) (revoked bool, known bool)
+
+// AuthorizationOptions is the external verification context an authorization
+// decision needs and a signed artifact cannot carry.
+type AuthorizationOptions struct {
+	// TrustedRoots are the delegator keys the caller is willing to root a chain
+	// at. An empty set authorizes nothing.
+	TrustedRoots []string
+	// Revocation resolves revocation state. A nil resolver means the caller
+	// supplied no revocation context, and authorization comes back
+	// indeterminate rather than positive.
+	Revocation RevocationResolver
+}
+
+// ChainAuthorization is the proof token a successful authorization returns. It
+// is deliberately a distinct type from the string code ValidateChainStructure
+// returns, so a structural pass cannot be substituted for an authorization pass
+// by accident.
+type ChainAuthorization struct {
+	// Hops is the number of links the authorization covered.
+	Hops int
+	// RevocationChecked reports whether revocation state was established for
+	// every link. VerifyChainAuthorization only ever returns a token with this
+	// set, because it refuses to succeed without a resolver that can answer.
+	// It is part of the token rather than a footnote in the docs so a caller
+	// reading a token from elsewhere can tell what it establishes, and it
+	// mirrors the Rust ChainAuthorization field of the same meaning.
+	RevocationChecked bool
+}
+
+// VerifyChainAuthorization decides whether a chain authorizes anything. On top
+// of ValidateChainStructure it requires the root delegator to be explicitly
+// trusted and every link to be resolvable as not revoked. It returns the
+// authorization and "" on success, or the zero value and the first refusal code.
+//
+// A nil Revocation resolver yields CodeRevocationIndeterminate. That is the
+// honest answer for a stateless verifier with no revocation context: the
+// alternative, treating "cannot check" as "not revoked", is exactly the
+// fail-open this separation exists to prevent.
+func VerifyChainAuthorization(in ChainInput, opts AuthorizationOptions) (ChainAuthorization, string) {
+	if len(in.Chain) == 0 {
+		return ChainAuthorization{}, CodeInvalidSig
+	}
+	rootDelegator, _ := in.Chain[0]["delegator"].(string)
+	trusted := false
+	for _, r := range opts.TrustedRoots {
+		if r != "" && r == rootDelegator {
+			trusted = true
+			break
 		}
 	}
-	return 0, false
+	if rootDelegator == "" || !trusted {
+		return ChainAuthorization{}, CodeUntrustedRoot
+	}
+	if code := ValidateChainStructure(in); code != "" {
+		return ChainAuthorization{}, code
+	}
+	if opts.Revocation == nil {
+		return ChainAuthorization{}, CodeRevocationIndeterminate
+	}
+	for _, link := range in.Chain {
+		revoked, known := opts.Revocation(link)
+		if !known {
+			return ChainAuthorization{}, CodeRevocationIndeterminate
+		}
+		if revoked {
+			return ChainAuthorization{}, CodeRevoked
+		}
+	}
+	return ChainAuthorization{Hops: len(in.Chain), RevocationChecked: true}, ""
 }
 
 // ---------------------------------------------------------------------------
 // Typed SDK-shape delegation-chain narrowing.
 // ---------------------------------------------------------------------------
 
+// effectiveBound is the authority ceiling a chain carries from its root down to
+// the link being checked. It is derived only from the artifacts in the chain: it
+// is a CEILING, never a remaining balance. Remaining balances belong to the
+// ledger and a stateless verifier does not reconstruct them.
+//
+// The rule it implements: a bounded ancestor facet never becomes unconstrained
+// because a descendant omitted the field. The effective spend ceiling is the
+// MINIMUM spendLimit over the bounded ancestors, and the effective unit is the
+// one carried from the NEAREST bounded ancestor. maxDepth narrows the same way.
+// An omitted facet inherits; it never means infinity.
+type effectiveBound struct {
+	spendLimit  *float64
+	spendUnit   string
+	maxDepth    *int
+	notBefore   string
+	notBeforeMs int64
+}
+
+// statedSpendUnit is the unit a link asserts. A bare spendLimit with no explicit
+// spendLimitUnit asserts the default unit "currency", matching the reference SDK
+// (src/core/delegation.ts: parentUnit = spendLimitUnit ?? (spendLimit !== undefined
+// ? 'currency' : undefined)). Without that default, a currency budget could be
+// relabelled as invocations one hop down.
+func statedSpendUnit(d types.Delegation) string {
+	if d.SpendLimitUnit != "" {
+		return d.SpendLimitUnit
+	}
+	if d.SpendLimit != nil {
+		return "currency"
+	}
+	return ""
+}
+
+// narrow folds one link's stated bounds into the effective ceiling and returns
+// the first violation. A stated bound may only tighten what it inherited; an
+// omitted bound inherits the ancestor bound unchanged.
+func (b *effectiveBound) narrow(d types.Delegation) error {
+	// Spend unit. Once an ancestor has bound the unit, a descendant that states
+	// a DIFFERENT unit is refused. Stating a spend limit without a unit states
+	// the default unit "currency", so a USD-bound authority cannot erase the
+	// unit by omitting spendLimitUnit and reappear as an unlabelled budget.
+	stated := statedSpendUnit(d)
+	if b.spendUnit != "" {
+		if stated != "" && stated != b.spendUnit {
+			return errors.New("spend unit change: child must carry the inherited spendLimitUnit unchanged")
+		}
+	} else if stated != "" {
+		// No ancestor bound the unit yet: this link introduces one, which is
+		// narrowing rather than conversion.
+		b.spendUnit = stated
+	}
+	// Spend ceiling: the minimum over the bounded ancestors. A non-finite
+	// ceiling is refused before it is compared: every comparison against NaN is
+	// false, so a NaN ceiling erased the bound and let the ceilings INCREASE
+	// down the chain (NaN, 1e12, 2e12, 3e12, 4e12 verified). commerce.RecordSpend
+	// in this repo already guards IsNaN and IsInf for the spend AMOUNT; the same
+	// rule belongs on the ceiling. It is not reachable over the wire, because JCS
+	// refuses to canonicalize a non-finite number and so it can never be signed,
+	// but it is reachable in process by any caller that builds a struct.
+	if d.SpendLimit != nil && (math.IsNaN(*d.SpendLimit) || math.IsInf(*d.SpendLimit, 0)) {
+		return errors.New("spend limit is not a finite number")
+	}
+	if d.SpendLimit != nil {
+		if b.spendLimit != nil && *d.SpendLimit > *b.spendLimit {
+			return errors.New("spend limit widening: child exceeds the effective inherited ceiling")
+		}
+		if b.spendLimit == nil || *d.SpendLimit < *b.spendLimit {
+			v := *d.SpendLimit
+			b.spendLimit = &v
+		}
+	}
+	// Depth ceiling: the minimum over the bounded ancestors. A descendant may
+	// not restate a larger maxDepth to raise an ancestor bound, and omitting
+	// maxDepth inherits rather than lifting it.
+	if d.MaxDepth != nil {
+		if b.maxDepth != nil && *d.MaxDepth > *b.maxDepth {
+			return errors.New("depth limit widening: child maxDepth exceeds the effective inherited maxDepth")
+		}
+		if b.maxDepth == nil || *d.MaxDepth < *b.maxDepth {
+			v := *d.MaxDepth
+			b.maxDepth = &v
+		}
+	}
+	// Activation floor: the MAXIMUM notBefore over the bounded ancestors. A
+	// descendant may not become active earlier than its ancestor, and omitting
+	// notBefore inherits the ancestor floor rather than meaning "active since
+	// the beginning of time".
+	if d.NotBefore != "" {
+		ms, ok := parseMillis(d.NotBefore)
+		if !ok {
+			return errors.New("notBefore unparseable: non-empty but invalid")
+		}
+		if b.notBefore != "" && ms < b.notBeforeMs {
+			return errors.New("activation widening: child notBefore precedes the effective inherited notBefore")
+		}
+		b.notBefore, b.notBeforeMs = d.NotBefore, ms
+	}
+	return nil
+}
+
+// checkDepthFloor refuses a negative currentDepth. currentDepth is a POSITION in
+// a chain, so it is never below zero, and the effective maxDepth is only a real
+// bound on chain length once there is a floor. Without one, a chain that starts
+// at currentDepth -5 fits eight links inside a stated maxDepth of 2: every hop
+// increments by exactly one, every hop stays at or below the ceiling, and the
+// depth rule holds to the letter while failing in purpose.
+func checkDepthFloor(d types.Delegation) error {
+	if d.CurrentDepth != nil && *d.CurrentDepth < 0 {
+		return errors.New("depth below zero: currentDepth is a position in a chain and may not be negative")
+	}
+	if d.MaxDepth != nil && *d.MaxDepth < 0 {
+		return errors.New("depth below zero: maxDepth may not be negative")
+	}
+	return nil
+}
+
 // VerifyDelegationChain checks a typed APS delegation chain (root first) for
 // monotonic narrowing: chain linkage, depth bounds, scope subset under
 // ScopeCovers, non-increasing spend limit, and non-widening expiry. It returns
 // nil for a valid chain or the first violation. Signatures and revocation are
 // checked separately (this is the narrowing invariant only).
+//
+// Every optional bound is evaluated against the EFFECTIVE ceiling carried from
+// the root (see effectiveBound), not against the immediate parent alone. Under a
+// pairwise reading, a three-hop chain that omits the bound in the middle hop
+// launders it back to unbounded: 100 -> absent -> 1,000,000 passed both pairwise
+// steps. Two hops cannot distinguish the two readings; three can.
 func VerifyDelegationChain(chain []types.Delegation) error {
+	// A present-but-empty chain is not a valid delegation and must fail closed,
+	// exactly as ValidateChainStructure refuses one (APG-01) and as the Rust and
+	// Python chain verifiers do. Returning nil here read "nothing to narrow" as
+	// "narrowing satisfied".
+	if len(chain) == 0 {
+		return errors.New("chain is empty")
+	}
+	// Seed the effective ceiling from the root, and check the root against it.
+	// An earlier revision left the root unchecked on the argument that a link's
+	// own depth is answered elsewhere. It is not: VerifyChainAuthorization reads
+	// the a2a map shape, which carries no depth members, and there is no Go
+	// authorization function over a typed chain, so nothing checked the root at
+	// all and VerifyDelegationChain([root]) returned nil for currentDepth 5
+	// under maxDepth 1.
+	var bound effectiveBound
+	if err := bound.narrow(chain[0]); err != nil {
+		return err
+	}
+	if err := checkDepthFloor(chain[0]); err != nil {
+		return err
+	}
+	rootDepth := 0
+	if chain[0].CurrentDepth != nil {
+		rootDepth = *chain[0].CurrentDepth
+	}
+	if bound.maxDepth != nil && rootDepth > *bound.maxDepth {
+		return errors.New("depth limit exceeded")
+	}
 	for i := 1; i < len(chain); i++ {
 		parent, child := chain[i-1], chain[i]
 		if child.DelegatedBy != parent.DelegatedTo {
 			return errors.New("chain linkage broken: child.delegatedBy != parent.delegatedTo")
 		}
-		// Depth must increase by exactly one per hop AND stay within the parent's maxDepth.
+		if err := bound.narrow(child); err != nil {
+			return err
+		}
+		// Depth must increase by exactly one per hop AND stay within the effective maxDepth.
 		// Checking only child.currentDepth <= parent.maxDepth let a long chain claim a flat depth
 		// and bypass the bound; require strict monotonic increment so depth tracks the real hop count.
 		parentDepth := 0
@@ -236,7 +533,10 @@ func VerifyDelegationChain(chain []types.Delegation) error {
 		if childDepth != parentDepth+1 {
 			return errors.New("depth not monotonic: child.currentDepth must be parent.currentDepth + 1")
 		}
-		if parent.MaxDepth != nil && childDepth > *parent.MaxDepth {
+		if err := checkDepthFloor(child); err != nil {
+			return err
+		}
+		if bound.maxDepth != nil && childDepth > *bound.maxDepth {
 			return errors.New("depth limit exceeded")
 		}
 		for _, s := range child.Scope {
@@ -251,21 +551,12 @@ func VerifyDelegationChain(chain []types.Delegation) error {
 				return errors.New("scope widening: child scope not covered by parent")
 			}
 		}
-		if parent.SpendLimit != nil && child.SpendLimit != nil && *child.SpendLimit > *parent.SpendLimit {
-			return errors.New("spend limit widening: child exceeds parent")
-		}
-		// Spend unit may not change across a hop. When the parent carries a unit and the child
-		// carries a spend limit, the child must carry the SAME unit; dropping or changing it (e.g.
-		// invocations -> currency, or invocations -> unit-less which downstream treats as currency)
-		// is a narrowing violation that a numeric-only check misses.
-		if parent.SpendLimitUnit != "" && child.SpendLimit != nil && child.SpendLimitUnit != parent.SpendLimitUnit {
-			return errors.New("spend unit change: child must carry the parent spendLimitUnit unchanged")
-		}
 		// Temporal narrowing: a child may not outlive its parent. A missing child expiry must not
 		// bypass the check when the parent has one. A non-empty but UNPARSEABLE expiry on either
 		// side must fail closed (invalidate the chain), never be silently skipped: gating the
 		// outlives comparison on both sides parsing let a garbage child expiry slip through and
-		// outlive its parent.
+		// outlive its parent. Expiry stays a pairwise rule because rejecting the omission makes
+		// pairwise containment transitively equal to the effective minimum.
 		var pe int64
 		var haveParentExpiry bool
 		if parent.ExpiresAt != "" {
