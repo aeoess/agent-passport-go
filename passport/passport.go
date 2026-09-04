@@ -330,13 +330,37 @@ func VerifyPassport(signed SignedPassport, trustedIssuers []string, now string) 
 
 	// Expiry check. Reference uses isExpired (expiresAt < now). We compare ISO
 	// strings via time parsing when a clock is supplied.
+	//
+	// A boundary the verifier cannot read is an error, not a skipped check. The
+	// unreadable case is reported separately from the expired case: "expired at
+	// X" claims a limit was read and had passed, which is a different finding
+	// from having read no limit, and an operator acts on them differently. This
+	// is the rule verify.VerifyChain already applies to a delegation hop.
 	if now != "" {
-		if expired, ok := isExpired(p.ExpiresAt, now); ok && expired {
-			errs = append(errs, "Passport expired at "+p.ExpiresAt)
-		}
-		if p.NotBefore != "" {
-			if before, ok := isBefore(now, p.NotBefore); ok && before {
-				errs = append(errs, "Passport not valid before "+p.NotBefore)
+		// The verifier's own clock counts. An unreadable now silently disabled
+		// both boundaries below for every passport this verifier checked.
+		if _, clockOK := parseClock(now); !clockOK {
+			errs = append(errs, "Unreadable verifier clock "+now)
+		} else {
+			expired, ok := isExpired(p.ExpiresAt, now)
+			switch {
+			case !ok:
+				errs = append(errs, "Unreadable expiresAt "+p.ExpiresAt)
+			case expired:
+				errs = append(errs, "Passport expired at "+p.ExpiresAt)
+			}
+			// notBefore is optional: absent leaves the lower edge of the window
+			// open. Present but unreadable is an error, because the verifier has
+			// seen no evidence the window has opened, which is a different claim
+			// from having seen a start date still in the future.
+			if p.NotBefore != "" {
+				before, ok := isBefore(now, p.NotBefore)
+				switch {
+				case !ok:
+					errs = append(errs, "Unreadable notBefore "+p.NotBefore)
+				case before:
+					errs = append(errs, "Passport not valid before "+p.NotBefore)
+				}
 			}
 		}
 	}
