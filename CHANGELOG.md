@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.7.0 ({{RELEASE_DATE}})
+## v0.7.0 (2026-09-04)
 
 Security release. The full cross-SDK account, including the affected version
 ranges and the severity assessment, is in the security advisory for this
