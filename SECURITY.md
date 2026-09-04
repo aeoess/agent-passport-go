@@ -27,7 +27,7 @@ If you discover a security vulnerability in the Agent Passport System Go SDK, pl
 | Older versions | ❌ |
 
 Every module version from v0.3.0 through v0.6.0 is unsupported; the advisory
-for v0.7.0, published at
+for v0.7.0, GHSA-2qwx-g8jg-4652, published at
 https://github.com/aeoess/agent-passport-go/security/advisories, describes the
 verification defects they carry, and records that the four pre-release tags
 before v0.3.0 were not assessed.
