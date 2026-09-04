@@ -194,7 +194,7 @@ var ErrInvalidUTF8 = errors.New("jcs: string is not valid UTF-8; RFC 8785 requir
 
 // CanonicalizationError is the typed error returned when canonicalization must
 // terminate on invalid input. Category is stable and machine-readable across the
-// APS SDKs (TypeScript, Python, Go); Reason names the specific failure. It
+// APS SDKs (TypeScript, Python, Rust, Go); Reason names the specific failure. It
 // unwraps to a sentinel (ErrLoneSurrogate or ErrInvalidUTF8) so both
 // errors.Is(err, jcs.ErrLoneSurrogate) and errors.As(err, &jcs.CanonicalizationError{})
 // work, and any existing `if err != nil` fail-closed path already handles it.
