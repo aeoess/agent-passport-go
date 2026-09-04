@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.7.0 (2026-09-04)
+
+Security release. The full cross-SDK account, including the affected version
+ranges and the severity assessment, is in the security advisory for this
+release. [The verification boundary](https://github.com/aeoess/agent-passport-go/blob/main/docs/verification-boundary.md)
+draws the authority-against-integrity line, names the surface this release
+classified, and records that the other exported verification surfaces here were
+not individually classified.
+
+Several exported verification functions returned a successful verification
+result (`valid: true` or an equivalent) without establishing all of the trust
+and temporal conditions the result implied. In the paths affected here, a
+passport verified with no caller-supplied trusted issuer, so the only key
+behind the result was the one the artifact carried, or an unreadable timestamp
+compared as neither expired nor stale. A relying party that treated those
+results as authorization could accept an artifact an attacker produced with
+keys the attacker controls.
+
+This release changes what the affected functions establish. Passport
+verification establishes issuer authority only from a caller-supplied
+trusted-issuer list, and a self-signed passport is accepted only under an
+explicit opt-in that marks the result integrity-only. A timestamp the verifier
+cannot read fails closed and is reported separately from a timestamp that was
+read and found to have passed, and an unreadable caller-supplied clock is
+reported separately from an unreadable artifact timestamp.
+
+### Affected surfaces
+
+One row per exported surface and defect class; a surface with two defect classes
+appears twice. Copied from the security advisory for this release.
+
+| package | exported name | module path | defect class | consumer change |
+|---|---|---|---|---|
+| go | `VerifyPassport` | github.com/aeoess/agent-passport-go/passport (passport/passport.go) | invalid time fails open | Valid flips from true to false for artifacts previously accepted. The signature change is described under authority false accept. Go errors are plain strings appended to the existing VerificationResult.Errors slice, so no public type gained a member, nothing is non_exhaustive-shaped, and no downstream code fails to compile. The break is that Valid flips from true to false for artifacts that were accepted, and any consumer that matches on error text must learn three new prefixes: 'Unreadable verifier clock', 'Unreadable expiresAt', 'Unreadable notBefore'. A conforming producer is unaffected; an explicit-offset past timestamp is still 'Passport expired at', |
+| go | `VerifyChallenge` | github.com/aeoess/agent-passport-go/passport (passport/challenge.go) | invalid time fails open | behavioural only: returns false when the challenge expiresAt or a non-empty clock cannot be read; there is no error list to inspect |
+| go | `VerifyAttestation` | github.com/aeoess/agent-passport-go/values (values/values.go) | invalid time fails open | Valid flips from true to false for artifacts previously accepted. The signature change is described under authority false accept. The signature (bool, []string) is unchanged and the new report is one more plain string in the existing error slice, so there is no exhaustive-match break in Go and nothing fails to compile. Attestations with an unreadable expiresAt now return false; consumers matching on error text gain 'Unreadable attestation expiresAt or verifier clock' |
+| go | `NegotiateCommonGround` | github.com/aeoess/agent-passport-go/values (values/values.go) | invalid time fails open | Valid flips from true to false for artifacts previously accepted. The signature change is described under authority false accept. The SharedGround struct is untouched; new entries simply appear in the existing IncompatibilityReasons []string and Compatible flips from true to false for pairs that previously negotiated. Because Go errors are plain strings rather than typed variants, there is no compile-time break for consumers, . Consumers matching on reason text gain the 'has an unreadable expiresAt' phrasing |
+| go | `VerifyPassport` | passport/passport.go | authority false accept | a new required input: the two trailing positional parameters become VerifyPassportOptions, so every call site must be updated; VerificationResult gains IssuerTrustChecked and SelfSignedAccepted, which is additive on the wire |
+
+### Migration
+
+| package | old call shape | new call shape | unmigrated call | artifacts reissued |
+|---|---|---|---|---|
+| go | `VerifyPassport(signed, trustedIssuers, now) returned Valid true for a passport with an absent or unreadable expiresAt` | `VerifyPassport(signed, VerifyPassportOptions{...}); the passport must carry a readable RFC 3339 expiresAt, which the reference type declares as required` | valid false: a new 'Unreadable expiresAt' string is appended to Errors, kept distinct from 'Passport expired at' | yes: passports with an absent or unreadable expiresAt must be reissued |
+| go | `VerifyPassport(signed, trustedIssuers, now) silently skipped a present-but-unreadable notBefore` | `VerifyPassport(signed, VerifyPassportOptions{...}); a present notBefore must parse, while an absent one still leaves the lower edge of the window open` | valid false: a new 'Unreadable notBefore' string is appended to Errors | yes: passports carrying an unreadable notBefore must be reissued |
+| go | `VerifyChallenge(challenge, signatureHex, publicKeyHex, now) returned true when the challenge ExpiresAt could not be read` | `same signature; the challenge must carry a readable RFC 3339 expiresAt when a non-empty clock is supplied` | valid false: returns false with no error list to inspect; freshness is the only replay protection on this surface | yes: challenges whose expiresAt is unreadable must be reissued |
+| go | `VerifyAttestation(att, now) returned true when the attestation ExpiresAt could not be read` | `same signature; a non-empty ExpiresAt with a non-empty clock must parse, while an empty ExpiresAt or empty clock stays a deliberate skip` | valid false: 'Unreadable attestation expiresAt or verifier clock' is appended to the returned error list | yes: attestations with a present but unreadable expiresAt must be reissued |
+| go | `VerifyPassport or VerifyAttestation called with an unreadable non-empty now string silently disabled expiry and notBefore for every artifact that verifier checked` | `for VerifyPassport set VerifyPassportOptions.Now to a readable RFC 3339 instant, or leave it empty to skip the time boundaries deliberately; VerifyAttestation, VerifyChallenge and NegotiateCommonGround keep their existing clock argument` | valid false: 'Unreadable verifier clock' is reported separately from an unreadable artifact timestamp, so an operator can tell which one is broken | no: the clock is a caller-supplied string, not an artifact |
+| go | `NegotiateCommonGround(pubKeyA, attestationA, pubKeyB, attestationB, now) reported Compatible true across unreadable timestamps` | `same signature; both attestations and the clock must carry readable RFC 3339 timestamps` | valid false: Compatible is false and new entries appear in IncompatibilityReasons; no public type changed | yes: attestations carrying unreadable timestamps must be reissued |
+| go | `VerifyPassport(signed, trustedIssuers, now)` returned Valid true on an empty or nil trustedIssuers list | `VerifyPassport(signed, VerifyPassportOptions{TrustedIssuers: ..., Now: ..., AllowSelfSigned: ...})` | compile error: the two trailing positional parameters become one options struct, so every call site fails to build until it is updated | no: no serialized bytes move and the countersignature preimage is untouched |
+
 ## v0.6.0
 
 Security release. Cross-language parity reference: TypeScript SDK v5.0.0, Rust SDK v0.2.0. The matching git tag v0.6.0 is created and pushed as a separate step.

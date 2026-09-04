@@ -310,7 +310,7 @@ func TestPassportLiveCrossImpl(t *testing.T) {
 	}
 	tsSigned := signed
 	tsSigned.Signature = ts.AgentSignature
-	if res := VerifyPassport(tsSigned, nil, fixedVerifyNow); !res.Valid {
+	if res := VerifyPassport(tsSigned, VerifyPassportOptions{Now: fixedVerifyNow, AllowSelfSigned: true}); !res.Valid {
 		t.Errorf("Go VerifyPassport rejected TS-signed passport: %v", res.Errors)
 	}
 	if !VerifyChallenge(ch, ts.ChallengeSignature, agentPub, fixedVerifyNow) {

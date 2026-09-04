@@ -34,7 +34,7 @@ func TestVerifyPassportTamperDetected(t *testing.T) {
 	signed, _, _, _, _ := fixturePassport(t)
 	// Tamper with a signed field; the agent signature must no longer verify.
 	signed.Passport.Mission = "tampered"
-	res := VerifyPassport(signed, nil, fixedVerifyNow)
+	res := VerifyPassport(signed, VerifyPassportOptions{Now: fixedVerifyNow, AllowSelfSigned: true})
 	if res.Valid {
 		t.Error("expected tampered passport to be invalid")
 	}
@@ -43,7 +43,7 @@ func TestVerifyPassportTamperDetected(t *testing.T) {
 func TestVerifyPassportExpiry(t *testing.T) {
 	signed, _, _, _, _ := fixturePassport(t)
 	// now is after expiresAt -> expired error.
-	res := VerifyPassport(signed, nil, "2030-01-01T00:00:00Z")
+	res := VerifyPassport(signed, VerifyPassportOptions{Now: "2030-01-01T00:00:00Z", AllowSelfSigned: true})
 	if res.Valid {
 		t.Error("expected expired passport to be invalid")
 	}
@@ -57,7 +57,7 @@ func TestVerifyPassportExpiry(t *testing.T) {
 		t.Errorf("expected expiry error, got %v", res.Errors)
 	}
 	// Empty clock skips expiry; passport remains valid.
-	if res2 := VerifyPassport(signed, nil, ""); !res2.Valid {
+	if res2 := VerifyPassport(signed, VerifyPassportOptions{Now: "", AllowSelfSigned: true}); !res2.Valid {
 		t.Errorf("expected valid with no clock, got %v", res2.Errors)
 	}
 }
@@ -66,7 +66,7 @@ func TestVerifyPassportTrustedIssuers(t *testing.T) {
 	signed, _, _, issuerPriv, issuerPub := fixturePassport(t)
 
 	// Self-signed (no issuer sig) but trustedIssuers required -> error.
-	res := VerifyPassport(signed, []string{issuerPub}, fixedVerifyNow)
+	res := VerifyPassport(signed, VerifyPassportOptions{TrustedIssuers: []string{issuerPub}, Now: fixedVerifyNow})
 	if res.Valid {
 		t.Error("expected self-signed passport to fail trustedIssuers check")
 	}
@@ -76,12 +76,12 @@ func TestVerifyPassportTrustedIssuers(t *testing.T) {
 		t.Fatalf("CountersignPassport: %v", err)
 	}
 	// Correct trusted issuer -> valid.
-	if res := VerifyPassport(cs, []string{issuerPub}, fixedVerifyNow); !res.Valid {
+	if res := VerifyPassport(cs, VerifyPassportOptions{TrustedIssuers: []string{issuerPub}, Now: fixedVerifyNow}); !res.Valid {
 		t.Errorf("expected valid with trusted issuer, got %v", res.Errors)
 	}
 	// Issuer not in trusted list -> error.
 	other := "00000000000000000000000000000000000000000000000000000000000000ff"
-	if res := VerifyPassport(cs, []string{other}, fixedVerifyNow); res.Valid {
+	if res := VerifyPassport(cs, VerifyPassportOptions{TrustedIssuers: []string{other}, Now: fixedVerifyNow}); res.Valid {
 		t.Error("expected failure when issuer not in trusted list")
 	}
 }

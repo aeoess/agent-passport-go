@@ -315,8 +315,18 @@ func VerifyAttestation(att FloorAttestation, now string) (bool, []string) {
 	if !verify.VerifyCanonicalSignature(attestationToMap(att), "signature", att.Signature, att.PublicKey) {
 		errs = append(errs, "Invalid attestation signature")
 	}
-	if att.ExpiresAt != "" && now != "" && timeLess(att.ExpiresAt, now) {
-		errs = append(errs, "Attestation expired")
+	// An expiry the verifier cannot read is not an expiry it can honour, and
+	// "Attestation expired" would be the wrong report: that claims a limit was
+	// read and had passed. An empty expiresAt or an empty clock stays a
+	// deliberate skip, as it is everywhere else in this module.
+	if att.ExpiresAt != "" && now != "" {
+		expired, ok := timeLess(att.ExpiresAt, now)
+		switch {
+		case !ok:
+			errs = append(errs, "Unreadable attestation expiresAt or verifier clock")
+		case expired:
+			errs = append(errs, "Attestation expired")
+		}
 	}
 	if att.FloorVersion == "" {
 		errs = append(errs, "No floor version specified")
@@ -532,11 +542,22 @@ func evaluatePrinciple(principle FloorPrinciple, receipts []ActionReceipt, deleg
 func NegotiateCommonGround(pubKeyA string, attestationA FloorAttestation, pubKeyB string, attestationB FloorAttestation, now string) SharedGround {
 	var reasons []string
 
-	if attestationA.ExpiresAt != "" && now != "" && timeLess(attestationA.ExpiresAt, now) {
-		reasons = append(reasons, "Agent "+attestationA.AgentID+" attestation expired")
-	}
-	if attestationB.ExpiresAt != "" && now != "" && timeLess(attestationB.ExpiresAt, now) {
-		reasons = append(reasons, "Agent "+attestationB.AgentID+" attestation expired")
+	// Both sides fail closed on an unreadable expiry for the same reason as
+	// VerifyAttestation: Compatible is derived from len(reasons), so a
+	// swallowed parse failure does not suppress a warning, it flips the verdict.
+	for _, side := range []struct {
+		att FloorAttestation
+	}{{attestationA}, {attestationB}} {
+		if side.att.ExpiresAt == "" || now == "" {
+			continue
+		}
+		expired, ok := timeLess(side.att.ExpiresAt, now)
+		switch {
+		case !ok:
+			reasons = append(reasons, "Agent "+side.att.AgentID+" attestation has an unreadable expiresAt")
+		case expired:
+			reasons = append(reasons, "Agent "+side.att.AgentID+" attestation expired")
+		}
 	}
 
 	majorA := majorVersion(attestationA.FloorVersion)

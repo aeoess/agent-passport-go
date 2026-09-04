@@ -74,9 +74,16 @@ func SignChallenge(challenge Challenge, privateKeyHex, publicKeyHex string) (Cha
 // an expired challenge, then verify the signature over the nonce. now is the
 // verifier clock as an ISO 8601 string; an empty string skips the expiry check
 // (matching a caller that has no deterministic clock).
+//
+// A non-empty timestamp that does not parse is a refusal, not a skipped check.
+// Freshness is the only thing standing between a replayed challenge response
+// and acceptance, so a challenge whose expiresAt cannot be read has to fail:
+// otherwise the cheapest way to defeat the expiry gate is to put a word where
+// the date goes, and the function still returns true.
 func VerifyChallenge(challenge Challenge, signatureHex, publicKeyHex, now string) bool {
 	if now != "" {
-		if expired, ok := isExpired(challenge.ExpiresAt, now); ok && expired {
+		expired, ok := isExpired(challenge.ExpiresAt, now)
+		if !ok || expired {
 			return false
 		}
 	}
@@ -89,9 +96,21 @@ func formatISO(t time.Time) string {
 	return t.UTC().Format("2006-01-02T15:04:05Z")
 }
 
-// isExpired reports whether expiresAt < now. The bool is false when either
-// timestamp cannot be parsed, so callers treat unparseable clocks as "do not
-// enforce" rather than silently failing closed in the wrong direction.
+// parseClock reads one RFC 3339 timestamp. It exists so a caller can tell an
+// unreadable verifier clock from an unreadable artifact timestamp: isExpired
+// and isBefore collapse both failures into one ok, and the two are different
+// findings. A verifier that cannot read its own clock has not checked
+// anything, which is the failure verify.VerifyChain reports as CodeValidityExp.
+func parseClock(ts string) (time.Time, bool) {
+	t, err := time.Parse(time.RFC3339, ts)
+	return t, err == nil
+}
+
+// isExpired reports whether expiresAt < now, and whether both timestamps could
+// be read at all. Callers MUST branch on ok before trusting expired: a false
+// expired with ok false means "this could not be determined", not "not
+// expired". Treating the two alike is what let an unreadable expiresAt pass a
+// gate that an honest expired one failed.
 func isExpired(expiresAt, now string) (expired bool, ok bool) {
 	e, err1 := time.Parse(time.RFC3339, expiresAt)
 	n, err2 := time.Parse(time.RFC3339, now)
@@ -101,7 +120,8 @@ func isExpired(expiresAt, now string) (expired bool, ok bool) {
 	return e.Before(n), true
 }
 
-// isBefore reports whether a < b for two ISO 8601 timestamps.
+// isBefore reports whether a < b for two ISO 8601 timestamps, and whether both
+// could be read. The same rule as isExpired applies to ok.
 func isBefore(a, b string) (before bool, ok bool) {
 	ta, err1 := time.Parse(time.RFC3339, a)
 	tb, err2 := time.Parse(time.RFC3339, b)

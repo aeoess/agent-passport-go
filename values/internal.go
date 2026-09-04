@@ -193,15 +193,23 @@ func nonNilStrings(s []string) []string {
 	return s
 }
 
-// timeLess reports whether RFC 3339 timestamp a is strictly before b. Both must
-// parse; on any parse failure it returns false (do not flag expiry on garbage).
-func timeLess(a, b string) bool {
+// timeLess reports whether RFC 3339 timestamp a is strictly before b, and
+// whether both could be read at all. Callers MUST branch on ok before trusting
+// less: a false less with ok false means "this could not be determined", not
+// "a is not before b".
+//
+// The ok flag exists because the previous signature returned a bare bool and
+// resolved every parse failure as "not expired". Each of this function's
+// callers is an expiry gate, so that single collapsed value was always decided
+// in favour of whoever supplied the unreadable timestamp. verify.VerifyChain
+// already refuses in the same situation rather than skipping.
+func timeLess(a, b string) (less bool, ok bool) {
 	ta, okA := parseTime(a)
 	tb, okB := parseTime(b)
 	if !okA || !okB {
-		return false
+		return false, false
 	}
-	return ta.Before(tb)
+	return ta.Before(tb), true
 }
 
 func parseTime(s string) (time.Time, bool) {
