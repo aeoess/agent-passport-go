@@ -5,14 +5,14 @@ agent identity, scoped delegation, signed receipts, and content-addressed
 request identity. It both verifies APS artifacts and, as of this release, issues
 and signs them, on RFC 8785 JCS canonical bytes and Ed25519.
 
-**Status:** `v0.5.0`. Issuing and signing are present (Waves 2
+**Status:** `v0.7.0`. Issuing and signing are present (Waves 2
 and 3). The earlier line was verify-only; that is no longer the case.
 v0.3.0 adds ComputeActionRefScopes and CanonicalizeScopes: the spec 4.1
 scopeRequired canonicalization (NFC per scope string, Unicode code-point
 sort) with cross-implementation vectors against the TS reference.
 
 ```
-go get github.com/aeoess/agent-passport-go@v0.5.0
+go get github.com/aeoess/agent-passport-go@v0.7.0
 ```
 
 
@@ -49,6 +49,8 @@ Issuing and signing (Waves 2+3):
   a commerce receipt, create a commerce delegation, extract a delegation chain.
 - **intoto** - emit and parse in-toto decision-receipt statements, compute a
   delegation-chain root.
+
+[The verification boundary](https://github.com/aeoess/agent-passport-go/blob/main/docs/verification-boundary.md) draws the authority-against-integrity line, names the surface this release classified, and records that the rest were not classified.
 
 ## Cross-implementation parity
 
