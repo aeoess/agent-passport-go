@@ -71,7 +71,7 @@ func hasErrorContaining(errs []string, substr string) bool {
 
 func TestPassportHonestExpiryIsExpired(t *testing.T) {
 	// The baseline every unreadable case below is measured against.
-	res := VerifyPassport(temporalFixture(t, "2020-01-01T00:00:00Z", ""), nil, probeNow)
+	res := VerifyPassport(temporalFixture(t, "2020-01-01T00:00:00Z", ""), VerifyPassportOptions{Now: probeNow, AllowSelfSigned: true})
 	if res.Valid || !hasErrorContaining(res.Errors, "Passport expired at") {
 		t.Fatalf("expected expired, got valid=%v errors=%v", res.Valid, res.Errors)
 	}
@@ -80,7 +80,7 @@ func TestPassportHonestExpiryIsExpired(t *testing.T) {
 func TestPassportUnreadableExpiryIsRefused(t *testing.T) {
 	for _, c := range unreadableStamps {
 		t.Run(c.name, func(t *testing.T) {
-			res := VerifyPassport(temporalFixture(t, c.value, ""), nil, probeNow)
+			res := VerifyPassport(temporalFixture(t, c.value, ""), VerifyPassportOptions{Now: probeNow, AllowSelfSigned: true})
 			if res.Valid {
 				t.Fatalf("expiresAt %q left the passport valid", c.value)
 			}
@@ -95,7 +95,7 @@ func TestPassportUnreadableExpiryIsRefused(t *testing.T) {
 }
 
 func TestPassportReadableFutureExpiryStillVerifies(t *testing.T) {
-	res := VerifyPassport(temporalFixture(t, "2030-01-01T00:00:00Z", ""), nil, probeNow)
+	res := VerifyPassport(temporalFixture(t, "2030-01-01T00:00:00Z", ""), VerifyPassportOptions{Now: probeNow, AllowSelfSigned: true})
 	if !res.Valid {
 		t.Fatalf("expected valid, got %v", res.Errors)
 	}
@@ -103,7 +103,7 @@ func TestPassportReadableFutureExpiryStillVerifies(t *testing.T) {
 
 func TestPassportExplicitOffsetIsReadableAndStillCompared(t *testing.T) {
 	// The repair narrows nothing that already parsed.
-	res := VerifyPassport(temporalFixture(t, "2020-01-01T05:30:00+05:30", ""), nil, probeNow)
+	res := VerifyPassport(temporalFixture(t, "2020-01-01T05:30:00+05:30", ""), VerifyPassportOptions{Now: probeNow, AllowSelfSigned: true})
 	if !hasErrorContaining(res.Errors, "Passport expired at") {
 		t.Fatalf("explicit offset should still compare as expired, got %v", res.Errors)
 	}
@@ -112,7 +112,7 @@ func TestPassportExplicitOffsetIsReadableAndStillCompared(t *testing.T) {
 // ── notBefore ──────────────────────────────────────────────────────────────
 
 func TestPassportHonestNotBeforeIsNotYetValid(t *testing.T) {
-	res := VerifyPassport(temporalFixture(t, "2030-01-01T00:00:00Z", "2029-01-01T00:00:00Z"), nil, probeNow)
+	res := VerifyPassport(temporalFixture(t, "2030-01-01T00:00:00Z", "2029-01-01T00:00:00Z"), VerifyPassportOptions{Now: probeNow, AllowSelfSigned: true})
 	if res.Valid || !hasErrorContaining(res.Errors, "not valid before") {
 		t.Fatalf("expected not-yet-valid, got valid=%v errors=%v", res.Valid, res.Errors)
 	}
@@ -124,7 +124,7 @@ func TestPassportUnreadableNotBeforeIsRefused(t *testing.T) {
 			continue // an empty notBefore is absent, and the profile marks it optional
 		}
 		t.Run(c.name, func(t *testing.T) {
-			res := VerifyPassport(temporalFixture(t, "2030-01-01T00:00:00Z", c.value), nil, probeNow)
+			res := VerifyPassport(temporalFixture(t, "2030-01-01T00:00:00Z", c.value), VerifyPassportOptions{Now: probeNow, AllowSelfSigned: true})
 			if res.Valid {
 				t.Fatalf("notBefore %q left the passport valid", c.value)
 			}
@@ -142,7 +142,7 @@ func TestPassportAbsentNotBeforeLeavesTheLowerEdgeOpen(t *testing.T) {
 	// notBefore is `json:"notBefore,omitempty"` in the profile, expiresAt is
 	// not. That asymmetry is the profile's and is pinned here so a later edit
 	// does not quietly make one match the other.
-	res := VerifyPassport(temporalFixture(t, "2030-01-01T00:00:00Z", ""), nil, probeNow)
+	res := VerifyPassport(temporalFixture(t, "2030-01-01T00:00:00Z", ""), VerifyPassportOptions{Now: probeNow, AllowSelfSigned: true})
 	if !res.Valid {
 		t.Fatalf("expected valid with no notBefore, got %v", res.Errors)
 	}
@@ -153,7 +153,7 @@ func TestPassportAbsentNotBeforeLeavesTheLowerEdgeOpen(t *testing.T) {
 func TestPassportEmptyClockStillSkipsBothBoundaries(t *testing.T) {
 	// Documented opt-out for a caller with no deterministic clock, asserted by
 	// unit_test.go. The repair must not turn it into a refusal.
-	res := VerifyPassport(temporalFixture(t, "2020-01-01T00:00:00Z", ""), nil, "")
+	res := VerifyPassport(temporalFixture(t, "2020-01-01T00:00:00Z", ""), VerifyPassportOptions{Now: "", AllowSelfSigned: true})
 	if !res.Valid {
 		t.Fatalf("expected an empty clock to skip expiry, got %v", res.Errors)
 	}
@@ -169,7 +169,7 @@ func TestPassportUnreadableClockIsRefused(t *testing.T) {
 			continue // empty is the documented opt-out above
 		}
 		t.Run(c.name, func(t *testing.T) {
-			res := VerifyPassport(temporalFixture(t, "2030-01-01T00:00:00Z", ""), nil, c.value)
+			res := VerifyPassport(temporalFixture(t, "2030-01-01T00:00:00Z", ""), VerifyPassportOptions{Now: c.value, AllowSelfSigned: true})
 			if res.Valid {
 				t.Fatalf("clock %q left the passport valid", c.value)
 			}

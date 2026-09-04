@@ -97,6 +97,36 @@ type VerificationResult struct {
 	Errors   []string       `json:"errors"`
 	Warnings []string       `json:"warnings"`
 	Passport *AgentPassport `json:"passport,omitempty"`
+	// IssuerTrustChecked reports whether an issuer-trust check ran at all,
+	// that is, whether a non-empty TrustedIssuers list was supplied.
+	IssuerTrustChecked bool `json:"issuerTrustChecked"`
+	// SelfSignedAccepted reports whether this verdict was reached with no
+	// trust root consulted, which happens only when AllowSelfSigned was set. A
+	// caller that must not act on a self-vouching passport branches on this
+	// rather than on the presence of a warning string.
+	SelfSignedAccepted bool `json:"selfSignedAccepted"`
+}
+
+// VerifyPassportOptions carries the inputs VerifyPassport needs beyond the
+// passport itself. An options struct rather than more positional parameters,
+// because that is this module's shape for verifier inputs (verify.ChainInput)
+// and for constructors (delegation.CreateOptions, commerce
+// CreateCommerceDelegationOptions and the rest); the module has no WithX
+// sibling-function style to follow instead.
+type VerifyPassportOptions struct {
+	// TrustedIssuers are issuer public keys whose countersignature this
+	// relying party accepts. An empty list holds no anchors; it does not mean
+	// "trust anyone", and on its own it is not an admission.
+	TrustedIssuers []string
+	// Now is the verifier clock as an RFC 3339 string. An empty string skips
+	// the expiry and notBefore checks, which is the documented opt-out for a
+	// caller with no deterministic clock.
+	Now string
+	// AllowSelfSigned accepts a passport carrying no trusted countersignature,
+	// on its own signature alone. False is the safe default. Consulted only
+	// when TrustedIssuers is empty: a caller that named issuers asked for that
+	// check, and this flag does not rescue a failed one.
+	AllowSelfSigned bool
 }
 
 // CreatePassportInput is the deterministic input set for CreatePassport. Unlike
@@ -283,9 +313,13 @@ func VerifyIssuerSignature(signed SignedPassport, issuerPublicKey string) bool {
 // now is the verifier clock as an ISO 8601 string; an empty string skips the
 // expiry and notBefore checks (callers without a deterministic clock omit it).
 // This is the verify-first surface, so it never touches a private key.
-func VerifyPassport(signed SignedPassport, trustedIssuers []string, now string) VerificationResult {
+func VerifyPassport(signed SignedPassport, opts VerifyPassportOptions) VerificationResult {
 	errs := []string{}
 	warnings := []string{}
+	trustedIssuers := opts.TrustedIssuers
+	now := opts.Now
+	issuerTrustChecked := len(trustedIssuers) > 0
+	selfSignedAccepted := false
 
 	if signed.Signature == "" {
 		return VerificationResult{Valid: false, Errors: []string{"Missing passport or signature"}, Warnings: warnings}
@@ -324,8 +358,16 @@ func VerifyPassport(signed SignedPassport, trustedIssuers []string, now string) 
 				}
 			}
 		}
+	} else if opts.AllowSelfSigned {
+		selfSignedAccepted = true
+		warnings = append(warnings, "Self-signed passport accepted: no trust root was consulted")
 	} else {
-		warnings = append(warnings, "No trustedIssuers provided - self-signed passports are accepted")
+		// A signature over a passport says who signed it, not who vouches for
+		// it. The verifying key is the one the passport carries, so a good
+		// signature is available to anyone who can generate a key pair.
+		// Integrity is established above; authority is the caller's to supply.
+		errs = append(errs, "Authority not established: no trustedIssuers were supplied. "+
+			"Pass TrustedIssuers, or set AllowSelfSigned to accept a self-vouching passport deliberately.")
 	}
 
 	// Expiry check. Reference uses isExpired (expiresAt < now). We compare ISO
@@ -379,9 +421,12 @@ func VerifyPassport(signed SignedPassport, trustedIssuers []string, now string) 
 	}
 
 	res := VerificationResult{
-		Valid:    len(errs) == 0,
-		Errors:   errs,
-		Warnings: warnings,
+		Valid:              len(errs) == 0,
+		IssuerTrustChecked: issuerTrustChecked,
+		// True only when the caller opted in AND the verdict also held.
+		SelfSignedAccepted: selfSignedAccepted && len(errs) == 0,
+		Errors:             errs,
+		Warnings:           warnings,
 	}
 	if res.Valid {
 		pp := p
